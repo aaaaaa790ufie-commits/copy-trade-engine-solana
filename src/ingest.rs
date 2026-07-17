@@ -117,6 +117,18 @@ fn build_providers(cfg: &Config) -> Vec<RpcProvider> {
 
     // Sort by priority descending
     providers.sort_by(|a, b| b.priority.cmp(&a.priority));
+
+    // Public fallback (last resort — no key needed, but higher latency)
+    if cfg.rpc.public_fallback {
+        providers.push(RpcProvider {
+            name: "public",
+            ws_url: "wss://api.mainnet-beta.solana.com".to_string(),
+            http_url: "https://api.mainnet-beta.solana.com".to_string(),
+            priority: 1,  // lowest — overridden by sorting? No, we sort desc, so 1 goes last
+            enabled: true,
+        });
+    }
+
     providers
 }
 
