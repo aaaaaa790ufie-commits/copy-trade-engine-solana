@@ -109,9 +109,10 @@ What's missing:
 
 ---
 
-## Phase 6 — Executor (Instruction Encoding)
+## Phase 6 — Executor (Instruction Encoding + Paper-Fill Model)
 
 **Status**: ⚠️ ALL 4 VENUES IMPLEMENTED — discriminators/data verified via Anchor IDL (accounts UNVERIFIED — need pool-state resolution)
+**Paper-fill model**: ✅ BASIC — fee-adjusted logging to SQLite. Pool-state lag fill is future work.
 
 What exists:
 - [x] `executor.rs` — `ExecCommand` struct, program ID constants
@@ -127,7 +128,9 @@ What exists:
   - 13 accounts from IDL (structure known, addresses need pool-state resolution)
 - [x] `build_jito_bundle()` — no-op (returns input unchanged)
 - [x] `estimate_tip()` — placeholder (1000 lamports)
-- [x] **Spawn function** — processes `ExecCommand` via `exec_rx.recv()` loop, DRY_RUN/LIVE gates
+- [x] **Paper-fill**: fee-adjusted trade logging to SQLite `wallet_trades` table with venue-specific bps fees + network cost
+  - `log_trade_to_db()` creates table if absent, writes raw and adjusted amounts
+  - Both fields preserved: `simulated_fill_price_sol` + `network_fee_sol`
 
 What's missing:
 - [ ] **PDA derivation** — Pump.fun bonding curve PDAs, PumpSwap pool PDAs not derived at instruction-build time
@@ -135,6 +138,8 @@ What's missing:
 - [ ] **Jupiter fallback** — configured in config.toml but no code exists
 - [ ] **On-chain cross-check** — discriminators/data formats verified against IDL; final per-venue account-order verification against `getTransaction` still needed
 - [ ] **Fee handling** — PumpSwap: 20 bps LP fee + 5 bps protocol fee; Raydium: trade fee rate from pool config
+- [ ] **Paper-fill: N-slots-later price** — currently uses raw `cmd.amount_sol` instead of pool state N slots after source fill
+- [ ] **Paper-fill: raw-vs-adjusted telemetry** — dashboard needs to display both numbers from `wallet_trades`
 
 ---
 
