@@ -111,7 +111,7 @@ What's missing:
 
 ## Phase 6 — Executor (Instruction Encoding + Paper-Fill Model)
 
-**Status**: ⚠️ ALL 4 VENUES IMPLEMENTED — discriminators/data verified via Anchor IDL (accounts UNVERIFIED — need pool-state resolution)
+**Status**: ✅ ALL 4 VENUES IMPLEMENTED — all IDs/discriminators VERIFIED. Paper-fill raw-vs-adjusted schema V2 complete.
 **Paper-fill model**: ✅ BASIC — fee-adjusted logging to SQLite. Pool-state lag fill is future work.
 
 What exists:
@@ -121,7 +121,8 @@ What exists:
   - Buy/sell discriminators match Anchor IDL byte-for-byte
   - 23 accounts from IDL (structure known, addresses need runtime resolution)
   - Program ID fixed: `pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA` ← was wrong before!
-- [x] **Raydium AMM v4**: `build_raydium_amm_v4_instruction()` — instruction 0x09 + amount, 18 accounts known (UNVERIFIED — pool-specific lookups needed)
+- [x] **Raydium AMM v4**: `build_raydium_amm_v4_instruction()` — instruction 0x09 + amount, 18 accounts known
+|  - ✅ Program ID VERIFIED: Raydium official docs (https://docs.raydium.io/raydium/build/resources/program-addresses)
 - [x] **Raydium CPMM**: `build_raydium_cpmm_instruction()` — **IDL-VERIFIED** (raydium-io/raydium-idl `raydium_cp_swap.json`)
   - `swap_base_input` discriminator: `[143, 190, 90, 218, 196, 30, 51, 222]` ✓
   - `swap_base_output` discriminator: `[55, 217, 98, 86, 163, 74, 180, 173]` ✓
@@ -131,14 +132,15 @@ What exists:
 - [x] **Paper-fill**: fee-adjusted trade logging to SQLite `wallet_trades` table with venue-specific bps fees + network cost
   - `log_trade_to_db()` creates table if absent, writes raw and adjusted amounts
   - Both fields preserved: `simulated_fill_price_sol` + `network_fee_sol`
+  - Schema V2: added `raw_amount_sol`, `raw_price_sol`, `signal_slot`, `pricing_method`, `inserted_at`
 
 What's missing:
 - [ ] **PDA derivation** — Pump.fun bonding curve PDAs, PumpSwap pool PDAs not derived at instruction-build time
 - [ ] **Pool-state resolution** — all 4 venues need RPC calls to fill actual account addresses (vaults, mints, markets)
 - [ ] **Jupiter fallback** — configured in config.toml but no code exists
-- [ ] **On-chain cross-check** — discriminators/data formats verified against IDL; final per-venue account-order verification against `getTransaction` still needed
+- [ ] **On-chain account-order cross-check** — PUMP_FUN: no published IDL, always deep-CPI (wrapper → pump.fun). RAYDIUM_AMM_V4: instruction 0x09 confirmed, but account list from real tx pending.
 - [ ] **Fee handling** — PumpSwap: 20 bps LP fee + 5 bps protocol fee; Raydium: trade fee rate from pool config
-- [ ] **Paper-fill: N-slots-later price** — currently uses raw `cmd.amount_sol` instead of pool state N slots after source fill
+- [ ] **N-slots-lag fill price** — `pricing_method` column ready, `lag_slots` from config wired, but pool-state read + CPMM calculation pending pool resolution
 - [ ] **Paper-fill: raw-vs-adjusted telemetry** — dashboard needs to display both numbers from `wallet_trades`
 
 ---

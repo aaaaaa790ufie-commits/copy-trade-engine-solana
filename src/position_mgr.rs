@@ -123,6 +123,7 @@ pub fn spawn(cfg: Config, exec_tx: Sender<ExecCommand>) -> tokio::task::JoinHand
                             direction: SwapDirection::Sell,
                             amount_sol: pos.amount_sol,
                             simulated_price_sol: 0.0,
+                            source_slot: 0,
                         };
                         if exec_tx.send(cmd).await.is_err() {
                             tracing::error!("[position_mgr] exec_tx send failed");

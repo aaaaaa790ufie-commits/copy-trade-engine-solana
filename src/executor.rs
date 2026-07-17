@@ -28,13 +28,14 @@ pub struct ExecCommand {
     pub direction: SwapDirection,
     pub amount_sol: f64,
     pub simulated_price_sol: f64,
+    pub source_slot: u64,
 }
 
 // ── Program ID constants ────────────────────────────────────────
 
 const PUMP_FUN_PROGRAM: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const PUMP_SWAP_PROGRAM: &str = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
-const RAYDIUM_AMM_V4: &str = "675kPX9MHTjS2zt1qfr1NYyze2V9cWzmRpJnLkzFY7";
+const RAYDIUM_AMM_V4: &str = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
 const RAYDIUM_CPMM: &str = "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP";
 const SYSTEM_PROGRAM: &str = "11111111111111111111111111111111";
 const TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
@@ -85,7 +86,6 @@ fn build_pump_fun_instruction(
             d.extend_from_slice(&min_return);
             d
         }
-        _ => return Err(anyhow::anyhow!("unsupported direction for Pump.fun")),
     };
 
     let accounts = vec![
@@ -132,7 +132,6 @@ fn build_pump_swap_instruction(
             d.extend_from_slice(&min_quote);
             d
         }
-        _ => return Err(anyhow::anyhow!("unsupported direction for PumpSwap")),
     };
 
     // PumpSwap buy/sell has 23 accounts per Anchor IDL.
@@ -219,7 +218,7 @@ fn build_instruction(
 
 /// Log a trade to the `wallet_trades` table for telemetry and paper-trading.
 /// Uses rusqlite to write to the same sentinel.db used by the Python scorer.
-fn log_trade_to_db(cmd: &ExecCommand, adjusted_amount: f64, total_fee_sol: f64) -> Result<()> {
+fn log_trade_to_db(cmd: &ExecCommand, adjusted_amount: f64, total_fee_sol: f64, pricing_method: &str) -> Result<()> {
     let db_path = "sentinel.db";
     let conn = rusqlite::Connection::open(db_path)?;
 
@@ -240,15 +239,23 @@ fn log_trade_to_db(cmd: &ExecCommand, adjusted_amount: f64, total_fee_sol: f64) 
             simulated_fill_price_sol REAL,
             network_fee_sol REAL DEFAULT 0.0,
             realized_pnl_sol REAL DEFAULT 0.0,
-            is_win BOOLEAN
+            is_win BOOLEAN,
+            raw_amount_sol REAL,
+            raw_price_sol REAL,
+            signal_slot INTEGER DEFAULT 0,
+            signal_timestamp INTEGER,
+            pool_address TEXT,
+            pricing_method TEXT DEFAULT 'naive',
+            inserted_at TEXT DEFAULT (datetime('now'))
         )",
     )?;
 
     conn.execute(
         "INSERT INTO wallet_trades
          (wallet_address, token_mint, venue, direction, amount_sol,
-          simulated_fill_price_sol, network_fee_sol)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+          simulated_fill_price_sol, network_fee_sol,
+          raw_amount_sol, raw_price_sol, signal_slot, pricing_method)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         rusqlite::params![
             cmd.source_wallet,
             cmd.token_mint,
@@ -257,6 +264,10 @@ fn log_trade_to_db(cmd: &ExecCommand, adjusted_amount: f64, total_fee_sol: f64) 
             adjusted_amount,
             cmd.simulated_price_sol,
             total_fee_sol,
+            cmd.amount_sol,  // raw_amount_sol (before fee)
+            cmd.simulated_price_sol,  // raw_price_sol
+            cmd.source_slot,
+            pricing_method,
         ],
     )?;
 
@@ -286,6 +297,27 @@ pub fn spawn(cfg: Config, mut exec_rx: Receiver<ExecCommand>) -> tokio::task::Jo
                 cmd.source_wallet, cmd.token_mint, cmd.venue
             );
 
+            // ── N-slots-lag: wait for configured lag before fill pricing ──
+            let lag_slots = cfg.simulation.lag_slots;
+            #[allow(unused_variables)]
+            let pricing_method = if lag_slots > 0 {
+                // In a full implementation this would:
+                // 1. Read current slot from RPC
+                // 2. Wait until current_slot >= signal_slot + lag_slots
+                // 3. Fetch pool state via getAccountInfo at that slot
+                // 4. Compute fill price from pool reserves using CPMM math
+                // 5. Set simulated_fill_price_sol and pricing_method = 'lagged'
+                //
+                // For now: signal intent, keep using naive pricing
+                tracing::trace!(
+                    "[executor] slot lag configured: {} slots (pending pool-state resolution)",
+                    lag_slots
+                );
+                "naive"
+            } else {
+                "naive"
+            };
+
             // ── Paper-fill model: fee-adjusted simulation ──────────
             let venue_fee_bps = match cmd.venue {
                 Venue::PumpSwap => 25.0,
@@ -299,7 +331,7 @@ pub fn spawn(cfg: Config, mut exec_rx: Receiver<ExecCommand>) -> tokio::task::Jo
             let adjusted_amount = cmd.amount_sol - total_fee_sol;
 
             // Log to SQLite
-            if let Err(e) = log_trade_to_db(&cmd, adjusted_amount, total_fee_sol) {
+            if let Err(e) = log_trade_to_db(&cmd, adjusted_amount, total_fee_sol, pricing_method) {
                 tracing::warn!("[executor] failed to log trade to DB: {e}");
             }
 

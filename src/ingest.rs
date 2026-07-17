@@ -48,7 +48,7 @@ pub enum SwapDirection {
 
 const PUMP_FUN: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const PUMP_SWAP: &str = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
-const RAYDIUM_AMM_V4: &str = "675kPX9MHTjS2zt1qfr1NYyze2V9cWzmRpJnLkzFY7";
+const RAYDIUM_AMM_V4: &str = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
 const RAYDIUM_CPMM: &str = "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP";
 
 /// Program IDs whose logs we subscribe to.

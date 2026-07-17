@@ -49,6 +49,8 @@ def init_scorer_tables(conn: sqlite3.Connection | None = None) -> None:
             );
 
             -- Per-trade breakdowns for a wallet (used for scoring)
+            -- SCHEMA V2: added raw_amount_sol, pricing_method, inserted_at, signal_slot, pool_address
+            -- Raw fields ensure historical rows are recomputable if pricing/fee model changes
             CREATE TABLE IF NOT EXISTS wallet_trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 wallet_address TEXT NOT NULL,
@@ -65,6 +67,13 @@ def init_scorer_tables(conn: sqlite3.Connection | None = None) -> None:
                 network_fee_sol REAL DEFAULT 0.0,
                 realized_pnl_sol REAL DEFAULT 0.0,
                 is_win BOOLEAN,
+                raw_amount_sol REAL,
+                raw_price_sol REAL,
+                signal_slot INTEGER DEFAULT 0,
+                signal_timestamp INTEGER,
+                pool_address TEXT,
+                pricing_method TEXT DEFAULT 'naive',
+                inserted_at TEXT DEFAULT (datetime('now')),
                 UNIQUE(wallet_address, signature)
             );
 

@@ -132,6 +132,7 @@ pub fn spawn(
                 direction: decision.swap.direction.clone(),
                 amount_sol: position_size_sol,
                 simulated_price_sol: decision.swap.price_sol,
+                source_slot: decision.swap.slot,
             };
 
             if exec_tx.send(cmd).await.is_err() {
