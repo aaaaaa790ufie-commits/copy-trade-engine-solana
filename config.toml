@@ -1,0 +1,99 @@
+# === Sentinel — Strategy Configuration ===
+# All paths: relative to project root.
+
+# ── Safety Gates ──────────────────────────────────────────────────
+# Double-gate: a real sendTransaction requires BOTH dry_run=false AND live=true.
+dry_run = true         # When true, log instead of submit
+live = false           # When false, short-circuit before any real send
+
+# ── RPC Pool ──────────────────────────────────────────────────────
+[rpc]
+# Which providers to use from .env. All default to true.
+helius_enabled = true
+alchemy_enabled = true
+quicknode_enabled = true
+getblock_enabled = true
+ankr_enabled = true    # HTTP-only, used for discovery/scorer polling
+public_fallback = true # api.mainnet-beta.solana.com (last resort, 2-5s stale)
+
+# WS pool priority weighting (higher = more traffic).
+# Helius and Alchemy should be primary (latency-driven).
+[rpc.priority]
+helius = 10
+alchemy = 9
+quicknode = 4
+getblock = 3
+
+# Rate-limit backoff (seconds)
+[rpc.backoff]
+initial = 2
+max = 30
+multiplier = 2.0       # exponential: 2 → 4 → 8 → 16 → 30
+
+# ── Discovery ─────────────────────────────────────────────────────
+[discovery]
+dex_screener_req_per_min = 60   # 60-300, DexScreener free tier
+seed_wallets_path = "discovery/seed_wallets.txt"
+early_buyer_max_tokens = 50     # tokens to check per discovery run
+early_buyer_max_wallets = 20    # earliest buyers per token
+birdeye_batch_size = 10         # wallets per Birdeye cross-check call
+
+# ── Scoring (Section 6) ──────────────────────────────────────────
+[scoring]
+recalc_interval_minutes = 15    # recompute every N minutes per wallet
+rolling_window_days = 14
+activity_min_tx_per_week = 5
+activity_max_tx_per_week = 300
+recency_decay_multiplier = 2.0  # weight last-7-days trades 2x vs days 8-14
+cluster_correlation_threshold = 0.90  # flag wallets >90% correlated
+
+# Tier thresholds (edge_score = win_rate * payoff_ratio - (1 - win_rate))
+[scoring.tier_a]
+# top quartile, auto-copy eligible
+min_edge_score = 0.5
+
+[scoring.tier_b]
+# watch-only, log but don't copy
+min_edge_score = 0.0
+
+# ── Fill Simulation (Section 6.1 — paper trading) ─────────────────
+[simulation]
+lag_slots = 2                    # simulate fill N slots after source
+jito_tip_per_trade_sol = 0.001   # assumed priority fee + tip (configurable)
+# Network cost per trade (entry + exit)
+network_cost_per_trade_sol = 0.002
+
+# ── Risk Management (Section 7) ──────────────────────────────────
+[risk]
+max_concurrent_positions = 5
+max_allocation_pct = 2.0         # % of trading wallet balance per position
+max_per_source_wallet_pct = 6.0  # % allocated to positions from one source
+
+[risk.stop_loss]
+stop_loss_pct = -25.0            # hard stop
+trailing_activate_pct = 40.0     # trailing activates at +40% peak
+trailing_distance_pct = 15.0     # trails 15% behind peak
+
+[risk.security]
+max_top10_holder_pct = 40.0
+require_lp_burned_or_locked = true
+require_mint_authority_renounced = true
+require_freeze_authority_renounced = true
+
+# ── Execution ─────────────────────────────────────────────────────
+[executor]
+# Which venues are enabled (all default to true)
+pump_fun_enabled = true
+pump_swap_enabled = true
+raydium_enabled = true
+# Jupiter aggregation: feature-flagged fallback only (adds routing RTT)
+jupiter_fallback_enabled = false
+
+# ── Position Manager ─────────────────────────────────────────────
+[position_manager]
+check_interval_seconds = 30      # how often to check TP/SL conditions
+auto_sell_enabled = true
+
+# ── Telemetry ────────────────────────────────────────────────────
+[telemetry]
+report_time = "08:00"            # daily report generation time (HH:MM UTC)

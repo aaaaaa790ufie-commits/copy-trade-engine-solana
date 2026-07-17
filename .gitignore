@@ -1,0 +1,38 @@
+# --- Secrets & Keys ---
+.env*
+*.key
+wallets/
+
+# --- Rust build artifacts ---
+target/
+**/*.rs.bk
+
+# --- Python cache ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# --- Logs ---
+*.log
+logs/
+
+# --- Streamlit cache ---
+.streamlit/
+
+# --- SQLite (data, keep schema only) ---
+*.db
+*.sqlite
+.venv/

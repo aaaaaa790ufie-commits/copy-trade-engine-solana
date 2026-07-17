@@ -1,0 +1,4 @@
+# Sentinel — Manual seed wallet list
+# One Solana base58 address per line. Lines starting with # are comments.
+# Populate from GMGN Discover / Smart Money tab or Birdeye wallet tracker.
+# Empty by default — the agent proceeds on automated discovery only.
