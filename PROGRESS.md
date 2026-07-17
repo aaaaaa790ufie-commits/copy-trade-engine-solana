@@ -135,19 +135,24 @@ What's missing:
 
 ## Phase 7 — Position Manager + Telemetry
 
-**Status**: ❌ NOT IMPLEMENTED — TP/SL logic is all TODO comments
+**Status**: ⚠️ PARTIALLY IMPLEMENTED — TP/SL loop wired, price fetch is stub
 
 What exists:
 - [x] `position_mgr.rs` — `Position` struct with all fields
 - [x] Loop ticks at configured interval
+- [x] **Stop-loss check** — compares current price against entry * (1 - stop_loss_pct)
+- [x] **Trailing stop logic** — tracks peak price, activates after entry age, triggers on drawdown
+- [x] **Auto-sell trigger** — sends `ExecCommand::Sell` to executor via shared channel when TP/SL fires
+- [x] **auto_sell_enabled gate** — config-driven toggle for sell signals
+- [x] **Connected to executor** — shares `exec_tx` with risk module
 - [x] `tracing_subscriber` configured in main.rs
 - [x] Heartbeat logging from every module
 
 What's missing:
-- [ ] **Stop-loss check** — commented out (TODO)
-- [ ] **Trailing stop logic** — commented out (TODO)
-- [ ] **Auto-sell trigger** — no executor channel connected
-- [ ] **Current price fetch** — no RPC call to get pool state
+- [ ] **Real price fetch** — `fetch_current_price()` returns 0.0 (stub). Needs pool state parsing (Raydium CPMM / Pump.fun bonding curve)
+- [ ] **SQLite persistence** — positions should persist across restarts
+- [ ] **Position close-feedback** — no way for executor to confirm sell completion back to position_mgr
+- [ ] **open_positions decrement in risk** — risk.rs counter never decrements; needs close-feedback from position_mgr
 
 ---
 
@@ -201,7 +206,7 @@ Requires (in order):
 1. **Phase 6 — instruction encoding**: highest-risk item. Pump.fun + Raydium AMM v4 built but UNVERIFIED.
    Cross-check against real `getTransaction` responses required before marking anything verified.
 2. **Phase 4 — PnL parsing**: implemented but end-to-end unvalidated — no real trader wallets in DB yet.
-3. **Phase 5 — position tracking**: `open_positions` never decrements; blocked on Phase 7 close-feedback.
+3. **Phase 5 — position tracking**: `open_positions` never decrements; blocked on position close-feedback.
 4. **No Jupiter fallback**: configured in config.toml but no code exists.
 5. **Phase 6,7,8 build on each other**: Executor → Position Mgr → Live-Submit
    must be built sequentially due to dependency chain.

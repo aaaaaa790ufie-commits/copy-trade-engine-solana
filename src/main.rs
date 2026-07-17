@@ -53,11 +53,12 @@ async fn main() -> Result<()> {
     let filter_handle = filter::spawn(cfg.clone(), swap_rx, decision_tx);
 
     // Filter → Risk → Executor (Decisions → ExecCommands)
-    let risk_handle = risk::spawn(cfg.clone(), decision_rx, exec_tx);
+    let exec_tx_risk = exec_tx.clone();
+    let risk_handle = risk::spawn(cfg.clone(), decision_rx, exec_tx_risk);
     let executor_handle = executor::spawn(cfg.clone(), exec_rx);
 
-    // Position manager (independent loop checking TP/SL)
-    let pos_mgr_handle = position_mgr::spawn(cfg.clone());
+    // Position manager (independent loop checking TP/SL, can trigger sell)
+    let pos_mgr_handle = position_mgr::spawn(cfg.clone(), exec_tx.clone());
 
     // ── Wait for any module to exit ─────────────────────────────
     tokio::select! {
