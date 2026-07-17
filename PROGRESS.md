@@ -187,7 +187,7 @@ Requires (in order):
 
 ## Pre-flight Status (Section 0)
 
-- [ ] **API keys in `.env`**: ⚠️ NONE. `cp .env.example .env` done but empty.
+- [x] **API key in `.env`**: ✅ Helius key added
 - [ ] **Manual seed list**: `discovery/seed_wallets.txt` is empty.
 - [ ] **Wallet funded**: 0 SOL — user responsibility per original goal.
 
@@ -195,11 +195,12 @@ Requires (in order):
 
 | Provider | WS | Status |
 |----------|----|--------|
-| Helius   | ❌ (blocked) | account created, API key blocked by disposable email |
+| Helius   | ✅ | ✅ API key added, WS connected |
 | Alchemy  | ✅ | ❌ not signed up yet |
 | QuickNode| ✅ | ❌ not signed up yet |
 | GetBlock | ✅ | ❌ not signed up yet |
 | Ankr     | ❌ (HTTP only) | ❌ not signed up yet |
+| Public   | ✅ | ✅ working (api.mainnet-beta.solana.com) |
 
 ## Known Issues
 
