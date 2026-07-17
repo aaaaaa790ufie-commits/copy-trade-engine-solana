@@ -111,21 +111,25 @@ What's missing:
 
 ## Phase 6 — Executor (Instruction Encoding)
 
-**Status**: ❌ NOT IMPLEMENTED — all 4 venue builders return errors
+**Status**: ⚠️ PARTIALLY IMPLEMENTED — Pump.fun + Raydium AMM v4 built (UNVERIFIED)
 
 What exists:
 - [x] `executor.rs` — `ExecCommand` struct, program ID constants
-- [x] `build_pump_fun_instruction()` — **returns `Err("not yet implemented")`** (discriminator + account layout documented in comments)
+- [x] `build_pump_fun_instruction()` — **real encoding** with discriminator + account layout (UNVERIFIED — needs cross-check against on-chain tx)
+- [x] `build_raydium_amm_v4_instruction()` — **real encoding** with instruction data (UNVERIFIED)
 - [x] `build_pump_swap_instruction()` — **returns `Err("not yet implemented")`**
-- [x] `build_raydium_amm_v4_instruction()` — **returns `Err("not yet implemented")`**
 - [x] `build_raydium_cpmm_instruction()` — **returns `Err("not yet implemented")`**
 - [x] `build_jito_bundle()` — no-op (returns input unchanged)
 - [x] `estimate_tip()` — placeholder (1000 lamports)
-- [x] Spawn function — commented-out event loop, heartbeat only
+- [x] **Spawn function** — now processes `ExecCommand` via `exec_rx.recv()` loop, with DRY_RUN/LIVE gates
 
 What's missing:
-- [ ] **ALL instruction encoding** — no venue has working instruction builders.
-- [ ] **Jupiter fallback** — configured in config.toml but no code wired.
+- [ ] **PumpSwap instruction encoding** — account layout not researched
+- [ ] **Raydium CPMM instruction encoding** — account layout not researched
+- [ ] **Jupiter fallback** — configured in config.toml but no code wired
+- [ ] **PDA derivation** — Pump.fun bonding curve PDAs not derived; account list incomplete
+- [ ] **Raydium AMM account resolution** — pool-specific accounts need lookups (open_orders, vaults, market)
+- [ ] **All encodings UNVERIFIED** — must be cross-checked against real on-chain transactions
 
 ---
 
@@ -186,7 +190,7 @@ Requires (in order):
 
 | Provider | WS | Status |
 |----------|----|--------|
-| Helius   | ✅ | ❌ not signed up yet |
+| Helius   | ❌ (blocked) | account created, API key blocked by disposable email |
 | Alchemy  | ✅ | ❌ not signed up yet |
 | QuickNode| ✅ | ❌ not signed up yet |
 | GetBlock | ✅ | ❌ not signed up yet |
@@ -194,12 +198,10 @@ Requires (in order):
 
 ## Known Issues
 
-1. **Phase 6 — instruction encoding**: highest-risk item. All venue builders return errors.
-   Cross-check against real `getTransaction` responses required before marking anything
-   other than UNVERIFIED.
-2. **Phase 4 — PnL parsing**: scorer records all trades with 0.0 PnL. Need swap
-   instruction decoding to extract real PnL.
-3. **Phase 5 — no SQLite**: filter reads from empty HashMap, not from `wallet_scores`.
+1. **Phase 6 — instruction encoding**: highest-risk item. Pump.fun + Raydium AMM v4 built but UNVERIFIED.
+   Cross-check against real `getTransaction` responses required before marking anything verified.
+2. **Phase 4 — PnL parsing**: implemented but end-to-end unvalidated — no real trader wallets in DB yet.
+3. **Phase 5 — position tracking**: `open_positions` never decrements; blocked on Phase 7 close-feedback.
 4. **No Jupiter fallback**: configured in config.toml but no code exists.
 5. **Phase 6,7,8 build on each other**: Executor → Position Mgr → Live-Submit
    must be built sequentially due to dependency chain.
