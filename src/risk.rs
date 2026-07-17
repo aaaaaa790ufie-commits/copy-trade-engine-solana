@@ -2,10 +2,66 @@
 //! (LP lock, mint authority, freeze authority, top-10 holder %).
 //! Consumes filter Decisions, produces ExecCommands.
 
+use solana_client::rpc_client::RpcClient as SolanaClient;
+use solana_sdk::pubkey::Pubkey;
+use std::str::FromStr;
+
 use crate::config::Config;
 use crate::executor::ExecCommand;
 use crate::filter::Decision;
 use tokio::sync::mpsc::{Receiver, Sender};
+
+const PUBLIC_RPC: &str = "https://api.mainnet-beta.solana.com";
+
+/// Check whether a token mint's authority is renounced (security pre-check).
+///
+/// Returns (mint_authority_renounced, freeze_authority_renounced).
+/// When the RPC call fails, both default to `false` (deny by default).
+fn check_mint_security(mint: &str) -> (bool, bool) {
+    let mint_pk = match Pubkey::from_str(mint) {
+        Ok(pk) => pk,
+        Err(_) => {
+            tracing::warn!("[risk] invalid mint address: {mint}");
+            return (false, false);
+        }
+    };
+
+    let client = SolanaClient::new(PUBLIC_RPC.to_string());
+
+    let account = match client.get_account(&mint_pk) {
+        Ok(acc) => acc,
+        Err(e) => {
+            tracing::warn!("[risk] getAccountInfo failed for {mint}: {e}");
+            return (false, false);
+        }
+    };
+
+    // Mint account layout (82 bytes):
+    //   0..4   = mint authority option (1 if present, 0 if None)
+    //   4..36  = mint authority pubkey (if option==1)
+    //   36..44 = supply (u64)
+    //   44..45 = decimals (u8)
+    //   45..46 = is_initialized (bool)
+    //   46..47 = freeze authority option
+    //   47..79 = freeze authority pubkey (if option==1)
+    let data = account.data;
+    if data.len() < 47 {
+        tracing::warn!("[risk] mint account too short for {mint}: {} bytes", data.len());
+        return (false, false);
+    }
+
+    let mint_auth_opt = data[0];
+    let freeze_auth_opt = data[46];
+
+    let mint_renounced = mint_auth_opt == 0;
+    let freeze_renounced = freeze_auth_opt == 0;
+
+    tracing::info!(
+        "[risk] mint security for {mint}: mint_authority_renounced={mint_renounced} freeze_authority_renounced={freeze_renounced}"
+    );
+
+    (mint_renounced, freeze_renounced)
+}
 
 /// Spawn the risk task.
 pub fn spawn(
@@ -45,30 +101,33 @@ pub fn spawn(
                 continue;
             }
 
-            // ── Security pre-check (TODO Phase 5) ─────────────────
-            // Would call getAccountInfo on the mint to verify:
-            //   - LP burned/locked
-            //   - Mint authority renounced
-            //   - Freeze authority renounced
-            //   - Top-10 holder concentration < config.risk.security.max_top10_holder_pct
+            // ── Security pre-check (mint authority) ───────────────
+            let mint = &decision.swap.token_mint;
+            let (mint_renounced, freeze_renounced) = check_mint_security(mint);
 
-            // For now, assume pass (paper mode)
-            let security_ok = true;
+            let mut security_ok = true;
+
+            if cfg.risk.security.require_mint_authority_renounced && !mint_renounced {
+                tracing::warn!("[risk] mint authority NOT renounced for {mint} — skipping");
+                security_ok = false;
+            }
+
+            if cfg.risk.security.require_freeze_authority_renounced && !freeze_renounced {
+                tracing::warn!("[risk] freeze authority NOT renounced for {mint} — skipping");
+                security_ok = false;
+            }
 
             if !security_ok {
-                tracing::warn!("[risk] security check failed for {}", decision.swap.token_mint);
                 continue;
             }
 
             // ── Compute position size ─────────────────────────────
-            // Percent of balance allocated (config.risk.max_allocation_pct)
-            // In paper mode, assume a fixed paper balance
-            let position_size_sol = 0.01 * cfg.risk.max_allocation_pct; // dummy: 2% of 1 SOL paper
+            let position_size_sol = 0.01 * cfg.risk.max_allocation_pct;
 
             // ── Send to executor ──────────────────────────────────
             let cmd = ExecCommand {
                 source_wallet: source.clone(),
-                token_mint: decision.swap.token_mint.clone(),
+                token_mint: mint.clone(),
                 venue: decision.swap.venue.clone(),
                 direction: decision.swap.direction.clone(),
                 amount_sol: position_size_sol,
@@ -86,11 +145,14 @@ pub fn spawn(
             tracing::info!(
                 "[risk] approved copy — {} {} {:.4} SOL via {:?} (open={})",
                 source,
-                decision.swap.token_mint,
+                mint,
                 position_size_sol,
                 decision.swap.venue,
                 open_positions
             );
+
+            // NOTE: open_positions never decrements until Phase 7 (position_mgr)
+            // sends a close event back. For now the counter only grows.
         }
     })
 }

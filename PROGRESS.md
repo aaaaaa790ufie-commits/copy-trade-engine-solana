@@ -90,20 +90,22 @@ What's missing:
 
 ## Phase 5 — Filter + Risk
 
-**Status**: ⚠️ STUB — pipeline compiles, no SQLite integration
+**Status**: ⚠️ Partially implemented
 
 What exists:
 - [x] `filter.rs` — receives `SwapEvent`, tier-based routing (A→copy, B→watch, C→skip)
 - [x] `TierCache` struct with interval refresh pattern
+- [x] **SQLite tier reader** — `TierCache.refresh()` queries `wallet_scores` table via rusqlite, refreshes every 30s
 - [x] `risk.rs` — per-source-wallet allocation cap, max concurrent positions
 - [x] Token security pre-check stubs (LP lock, mint authority, top-10 holder %)
 - [x] Produces `ExecCommand` for executor
 - [x] All modules wired in `main.rs` via tokio mpsc channels
 
 What's missing:
-- [ ] **SQLite reader** — `TierCache` reads from empty `HashMap`. Should query `wallet_scores` table.
-- [ ] **Real security checks** — `security_ok` hard-coded to `true`.
-- [ ] **Position tracking** — `open_positions` increments but never decrements.
+- [x] **Mint authority check** — RPC call to `getAccountInfo`, parses mint account bytes to verify authorities are renounced
+- [ ] **LP burn/lock check** — requires token supply + burn address query
+- [ ] **Top-10 holder concentration** — requires `getProgramAccounts` or DAS API
+- [ ] **Position tracking** — `open_positions` increments but never decrements (blocked on Phase 7 position_mgr close-feedback channel)
 
 ---
 
