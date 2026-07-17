@@ -63,21 +63,28 @@ and selectively copies their trades with independent risk management.
 
 ## Phase 4 — Scorer
 
-**Status**: ⚠️ STUB — scoring math exists, but PnL is always 0.0
+**Status**: ✅ PnL PARSING IMPLEMENTED — real trade extraction from raw transactions
 
 What exists:
-- [x] `scorer/` — Python module (`run_scorer.py`, `db.py`, `__init__.py`)
+- [x] `scorer/` — Python module (`run_scorer.py`, `db.py`, `pnl_parser.py`, `__init__.py`)
 - [x] `db.py` — SQLite tables: `wallet_scores`, `wallet_trades`
 - [x] `compute_edge_score()` — full Section 6 formula implemented
 - [x] `assign_tier()` — A/B/C logic based on edge + activity
 - [x] Recency decay (last 7 days weighted 2x)
 - [x] Activity filter (5-300 tx/week)
-- [x] Cluster check stub
+- [x] **Real PnL parser** (`scorer/pnl_parser.py`):
+  - Parses `preTokenBalances`/`postTokenBalances` and SOL balance changes
+  - Classifies trades: buy / sell / swap / unknown
+  - Tracks positions with cost basis (average cost method)
+  - Realized PnL computed on sells: `pnl = sol_received - (tokens_sold * avg_cost_per_token)`
+  - Detects DEX program involved (Raydium, PumpFun, Jupiter)
+  - Failed transactions automatically skipped
+- [x] Unit tests (`scorer/tests/test_pnl_parser.py`) — 4/4 passing
 
 What's missing:
-- [ ] **Trade PnL parsing** — `run_scorer.py` line 219-227: all trades recorded with `realized_pnl_sol: 0.0`. No swap instruction parsing to extract real PnL.
-- [ ] **Never run end-to-end** — cannot score wallets without (a) API keys for RPC, (b) discovery having run first, (c) real PnL parsing.
-- [ ] Scoring with all-zero PnL produces garbage scores (by definition all trades are "losses" of 0 SOL).
+- [ ] **End-to-end validation** — needs candidate wallets in DB (runs on discovery output)
+- [ ] **Cluster correlation check** (Section 6) — stubbed
+- [ ] `run_scorer.py` now calls `parse_trades_from_wallet()` instead of stub — but no wallet data to test with yet
 
 ---
 

@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from discovery.early_buyer import RpcClient
 from discovery.db import get_connection as discovery_get_connection
+from scorer.pnl_parser import parse_trades_from_wallet
 from scorer.db import (
     init_scorer_tables,
     get_connection,
@@ -210,21 +211,18 @@ def main() -> None:
             continue
 
         # Fetch each transaction to decode PnL
-        trades = []
+        raw_txns = []
         for sig_info in sigs:
             tx = rpc.get_transaction(sig_info["signature"])
-            if not tx:
-                continue
+            if tx:
+                raw_txns.append(tx)
 
-            # TODO: parse swap instructions to determine PnL
-            # For Phase 4 stub: record as unknown direction with 0 PnL
-            trades.append({
-                "direction": "unknown",
-                "realized_pnl_sol": 0.0,
-                "block_time": tx.get("blockTime", 0),
-                "slot": sig_info.get("slot", 0),
-                "signature": sig_info["signature"],
-            })
+        # Parse trades from raw transactions using pre/post token balance analysis
+        trades = parse_trades_from_wallet(raw_txns, wallet)
+
+        if not trades and sigs:
+            # No parseable trades — record as empty so scoring gets -1.0 edge
+            logger.debug("No parseable trades for %s — all txns unrecognised", wallet[:12])
 
         # Compute score
         stats = compute_edge_score(trades)
