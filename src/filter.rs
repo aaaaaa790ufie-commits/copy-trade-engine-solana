@@ -1,6 +1,8 @@
 //! Filter — consumes SwapEvent + current wallet tier from SQLite,
 //! decides copy/skip based on strategy config.
 
+use std::time::Instant;
+
 use crate::config::Config;
 use crate::ingest::SwapEvent;
 use serde::Serialize;
@@ -18,15 +20,60 @@ pub struct Decision {
 
 /// In-memory cache of wallet tiers, refreshed from SQLite on an interval.
 struct TierCache {
-    // wallet_address -> (tier, edge_score)
     tiers: std::collections::HashMap<String, (String, f64)>,
-    last_refresh: std::time::Instant,
+    last_refresh: Instant,
     refresh_interval: std::time::Duration,
+    db_path: String,
+}
+
+impl TierCache {
+    fn refresh(&mut self) {
+        self.last_refresh = Instant::now();
+        let before = self.tiers.len();
+
+        match rusqlite::Connection::open(&self.db_path) {
+            Ok(conn) => {
+                let mut stmt = match conn.prepare(
+                    "SELECT wallet_address, tier, edge_score FROM wallet_scores"
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("[filter] SQLite prepare failed: {e}");
+                        return;
+                    }
+                };
+                let rows = match stmt.query_map([], |row| {
+                    let addr: String = row.get(0)?;
+                    let tier: String = row.get(1)?;
+                    let edge: f64 = row.get(2)?;
+                    Ok((addr, tier, edge))
+                }) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!("[filter] SQLite query failed: {e}");
+                        return;
+                    }
+                };
+
+                self.tiers.clear();
+                for row in rows.flatten() {
+                    self.tiers.insert(row.0, (row.1, row.2));
+                }
+                tracing::info!(
+                    "[filter] tier cache refreshed — {} entries (was {})",
+                    self.tiers.len(), before
+                );
+            }
+            Err(e) => {
+                tracing::warn!("[filter] cannot open SQLite {p}: {e}", p = self.db_path);
+            }
+        }
+    }
 }
 
 /// Spawn the filter task.
 pub fn spawn(
-    _cfg: Config,
+    cfg: Config,
     mut swap_rx: Receiver<SwapEvent>,
     decision_tx: Sender<Decision>,
 ) -> tokio::task::JoinHandle<()> {
@@ -35,25 +82,21 @@ pub fn spawn(
 
         let mut cache = TierCache {
             tiers: std::collections::HashMap::new(),
-            last_refresh: std::time::Instant::now(),
+            last_refresh: Instant::now(),
             refresh_interval: std::time::Duration::from_secs(30),
+            db_path: "sentinel.db".to_string(),
         };
 
         while let Some(swap) = swap_rx.recv().await {
-            // Refresh tier cache periodically (not on every swap — hot path)
             if cache.last_refresh.elapsed() >= cache.refresh_interval {
-                // TODO Phase 5: read from SQLite (scorer output)
-                tracing::debug!("[filter] refreshing tier cache from SQLite");
-                cache.last_refresh = std::time::Instant::now();
+                cache.refresh();
             }
 
-            // Look up the source wallet's tier
             let (tier, edge_score) = cache.tiers
                 .get(&swap.source_wallet)
                 .cloned()
                 .unwrap_or_else(|| ("C".to_string(), 0.0));
 
-            // Decision logic
             let (should_copy, reason) = match tier.as_str() {
                 "A" => (true, format!("Tier A — edge_score={:.3}", edge_score)),
                 "B" => (false, format!("Tier B — watch-only, edge_score={:.3}", edge_score)),
