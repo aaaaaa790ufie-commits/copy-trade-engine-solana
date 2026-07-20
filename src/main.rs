@@ -6,6 +6,7 @@ mod filter;
 mod risk;
 mod executor;
 mod position_mgr;
+mod lagfill;
 
 #[tokio::main]
 async fn main() -> Result<()> {

@@ -111,7 +111,7 @@ What's missing:
 
 ## Phase 6 — Executor (Instruction Encoding + Paper-Fill Model)
 
-**Status**: ✅ ALL 4 VENUES IMPLEMENTED — all IDs/discriminators VERIFIED. Paper-fill raw-vs-adjusted schema V2 complete.
+**Status**: ✅ ALL 4 VENUES IMPLEMENTED — all IDs/discriminators VERIFIED. Paper-fill raw-vs-adjusted schema V2 + Phase 9 lagged-fill pricing complete.
 **Paper-fill model**: ✅ BASIC — fee-adjusted logging to SQLite. Pool-state lag fill is future work.
 
 What exists:
@@ -140,7 +140,15 @@ What's missing:
 - [ ] **Jupiter fallback** — configured in config.toml but no code exists
 - [ ] **On-chain account-order cross-check** — PUMP_FUN: no published IDL, always deep-CPI (wrapper → pump.fun). RAYDIUM_AMM_V4: instruction 0x09 confirmed, but account list from real tx pending.
 - [ ] **Fee handling** — PumpSwap: 20 bps LP fee + 5 bps protocol fee; Raydium: trade fee rate from pool config
-- [ ] **N-slots-lag fill price** — `pricing_method` column ready, `lag_slots` from config wired, but pool-state read + CPMM calculation pending pool resolution
+- [x] **N-slots-lag fill price** — `pricing_method` column ready, `lag_slots` from config wired, but pool-state read + CPMM calculation pending pool resolution
+- [x] **Phase 9: lagged fill pricing** — pool resolution × slot wait × fill computation (implemented, needs live-verification)
+  - Pump.fun: bonding-curve PDA derived from mint seeds=["bonding-curve", mint], local no-RPC
+  - PumpSwap: pool PDA from seeds=["pool", base_mint, quote_mint] (tentative)
+  - Raydium AMM v4/CPMM: Raydium API (https://api-v3.raydium.io/main/info) lookup
+  - SQLite pool_cache table (mint→pool_address) to avoid repeated lookups
+  - RPC pool-state read via getAccountInfo, CPMM fill price computed from virtual/real reserves
+  - Falls back to `pricing_method='naive'` on any resolution/fetch failure
+- [ ] **Section 3 spot-check** — pending: need logged trades in sentinel.db to verify lagged price vs naive
 - [ ] **Paper-fill: raw-vs-adjusted telemetry** — dashboard needs to display both numbers from `wallet_trades`
 
 ---

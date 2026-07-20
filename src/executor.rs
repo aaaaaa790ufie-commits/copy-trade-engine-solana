@@ -3,16 +3,14 @@
 //!
 //! Phase 6: real instruction encoding for Pump.fun, PumpSwap, Raydium AMM v4, Raydium CPMM.
 //! Phase 8: live-submit path with Jito bundles.
-//!
-//! All instruction encodings are cross-checked against Anchor IDLs from the official
-//! program repositories (except Raydium AMM v4 which uses instruction-index dispatch).
-//! PumpSwap: verified against pump-fun/pump-public-docs IDL (pump_amm.json)
-//! Raydium CPMM: verified against raydium-io/raydium-idl (raydium_cp_swap.json)
+//! Phase 9: lagged fill pricing — pool-address resolution, slot wait, CPMM price computation.
 
 use crate::config::Config;
 use crate::ingest::{SwapDirection, Venue};
+use crate::lagfill;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use solana_client::rpc_client::RpcClient;
 use solana_sdk::instruction::{AccountMeta, Instruction};
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::transaction::Transaction;
@@ -43,7 +41,6 @@ const TOKEN_2022_PROGRAM: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const ASSOC_TOKEN_PROGRAM: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xr25B9d8x7UfMtM5E";
 const RENT_PROGRAM: &str = "SysvarRent111111111111111111111111111111111";
 
-/// Convert SOL amount to lamports (u64).
 fn sol_to_lamports(sol: f64) -> u64 {
     (sol * 1_000_000_000.0) as u64
 }
@@ -134,8 +131,6 @@ fn build_pump_swap_instruction(
         }
     };
 
-    // PumpSwap buy/sell has 23 accounts per Anchor IDL.
-    // Full list requires pool-key resolution at runtime.
     let accounts = vec![
         AccountMeta::new(program_id, false),
         AccountMeta::new(pk(SYSTEM_PROGRAM), false),
@@ -216,13 +211,17 @@ fn build_instruction(
 
 // ── SQLite trade logging (paper-fill model) ────────────────────
 
-/// Log a trade to the `wallet_trades` table for telemetry and paper-trading.
-/// Uses rusqlite to write to the same sentinel.db used by the Python scorer.
-fn log_trade_to_db(cmd: &ExecCommand, adjusted_amount: f64, total_fee_sol: f64, pricing_method: &str) -> Result<()> {
+fn log_trade_to_db(
+    cmd: &ExecCommand,
+    adjusted_amount: f64,
+    total_fee_sol: f64,
+    pricing_method: &str,
+    fill_price_sol: f64,
+    pool_address: &str,
+) -> Result<()> {
     let db_path = "sentinel.db";
     let conn = rusqlite::Connection::open(db_path)?;
 
-    // Ensure the table exists
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS wallet_trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -254,20 +253,21 @@ fn log_trade_to_db(cmd: &ExecCommand, adjusted_amount: f64, total_fee_sol: f64, 
         "INSERT INTO wallet_trades
          (wallet_address, token_mint, venue, direction, amount_sol,
           simulated_fill_price_sol, network_fee_sol,
-          raw_amount_sol, raw_price_sol, signal_slot, pricing_method)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+          raw_amount_sol, raw_price_sol, signal_slot, pricing_method, pool_address)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         rusqlite::params![
             cmd.source_wallet,
             cmd.token_mint,
             format!("{:?}", cmd.venue),
             format!("{:?}", cmd.direction),
             adjusted_amount,
-            cmd.simulated_price_sol,
+            fill_price_sol,
             total_fee_sol,
-            cmd.amount_sol,  // raw_amount_sol (before fee)
-            cmd.simulated_price_sol,  // raw_price_sol
+            cmd.amount_sol,
+            cmd.simulated_price_sol,
             cmd.source_slot,
             pricing_method,
+            pool_address,
         ],
     )?;
 
@@ -286,10 +286,23 @@ fn estimate_tip(_cfg: &Config) -> u64 {
 
 // ── Spawn function ──────────────────────────────────────────────
 
-/// Spawn the executor task.
+/// Spawn the executor task with lagged fill pricing.
 pub fn spawn(cfg: Config, mut exec_rx: Receiver<ExecCommand>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         tracing::info!("[executor] starting — DRY_RUN={}, LIVE={}", cfg.dry_run, cfg.live);
+
+        // ── Create RPC client from env ───────────────────────────
+        let helius_key = std::env::var("SOLANA_API_KEY")
+            .or_else(|_| std::env::var("HELIUS_API_KEY"))
+            .unwrap_or_default();
+        let rpc_url = if !helius_key.is_empty() {
+            format!("https://mainnet.helius-rpc.com/?api-key={}", helius_key)
+        } else {
+            "https://api.mainnet-beta.solana.com".to_string()
+        };
+        let rpc_client = RpcClient::new(&rpc_url);
+        let http_client = reqwest::Client::new();
+        tracing::info!("[executor] RPC client -> {}", &rpc_url[..40]);
 
         while let Some(cmd) = exec_rx.recv().await {
             tracing::info!(
@@ -297,26 +310,84 @@ pub fn spawn(cfg: Config, mut exec_rx: Receiver<ExecCommand>) -> tokio::task::Jo
                 cmd.source_wallet, cmd.token_mint, cmd.venue
             );
 
-            // ── N-slots-lag: wait for configured lag before fill pricing ──
+            // ── Resolve pool address and compute lagged fill price ──
+            let pricing_method: &str;
+            let fill_price_sol: f64;
+            let pool_address: String;
+
             let lag_slots = cfg.simulation.lag_slots;
-            #[allow(unused_variables)]
-            let pricing_method = if lag_slots > 0 {
-                // In a full implementation this would:
-                // 1. Read current slot from RPC
-                // 2. Wait until current_slot >= signal_slot + lag_slots
-                // 3. Fetch pool state via getAccountInfo at that slot
-                // 4. Compute fill price from pool reserves using CPMM math
-                // 5. Set simulated_fill_price_sol and pricing_method = 'lagged'
+            if lag_slots > 0 {
+                // Phase 9: lagged fill pricing
                 //
-                // For now: signal intent, keep using naive pricing
-                tracing::trace!(
-                    "[executor] slot lag configured: {} slots (pending pool-state resolution)",
-                    lag_slots
-                );
-                "naive"
+                // 1. Check pool cache (sync DB — not held across await)
+                let cached = {
+                    let conn = rusqlite::Connection::open("sentinel.db").ok();
+                    let conn_ref = conn.as_ref();
+                    if let Some(c) = conn_ref {
+                        let _ = lagfill::init_pool_cache(c);
+                        lagfill::get_cached_pool(c, &cmd.token_mint, &cmd.venue).ok().flatten()
+                    } else {
+                        None
+                    }
+                };
+
+                // 2. Resolve if not cached (PDA for Pump.fun/PumpSwap, API for Raydium)
+                let pool_addr = match cached {
+                    Some(addr) => addr,
+                    None => {
+                        let resolved = lagfill::resolve_pool_address(
+                            &cmd.token_mint, &cmd.venue, &http_client, None,
+                        ).await;
+                        match resolved {
+                            Ok(Some(addr)) => {
+                                // Cache it
+                                if let Ok(conn) = rusqlite::Connection::open("sentinel.db") {
+                                    let _ = lagfill::init_pool_cache(&conn);
+                                    let _ = lagfill::cache_pool_address(&conn, &cmd.token_mint, &cmd.venue, &addr);
+                                }
+                                addr
+                            }
+                            _ => String::new(), // empty = not found
+                        }
+                    }
+                };
+
+                match pool_addr.as_str() {
+                    "" => {
+                        pool_address = String::new();
+                        tracing::debug!("[executor] pool not resolved — naive pricing");
+                        fill_price_sol = cmd.simulated_price_sol;
+                        pricing_method = "naive";
+                    }
+                    addr => {
+                        pool_address = addr.to_string();
+                        tracing::debug!("[executor] pool resolved: {} -> {}", cmd.token_mint, addr);
+
+                        // 3. Wait configured lag slots
+                        let target_slot = cmd.source_slot + lag_slots as u64;
+                        match lagfill::wait_for_slot(&rpc_client, target_slot, 10_000).await {
+                            Ok(_) => {
+                                // 4. Compute fill price from pool state
+                                let (fill, method) = lagfill::compute_lagged_fill_price(
+                                    &cmd.venue, &cmd.token_mint, &addr,
+                                    cmd.amount_sol, cmd.simulated_price_sol, &rpc_client,
+                                ).await;
+                                fill_price_sol = fill;
+                                pricing_method = method;
+                            }
+                            Err(e) => {
+                                tracing::warn!("[executor] slot wait failed: {e} — naive");
+                                fill_price_sol = cmd.simulated_price_sol;
+                                pricing_method = "naive";
+                            }
+                        }
+                    }
+                }
             } else {
-                "naive"
-            };
+                pool_address = String::new();
+                fill_price_sol = cmd.simulated_price_sol;
+                pricing_method = "naive";
+            }
 
             // ── Paper-fill model: fee-adjusted simulation ──────────
             let venue_fee_bps = match cmd.venue {
@@ -331,14 +402,14 @@ pub fn spawn(cfg: Config, mut exec_rx: Receiver<ExecCommand>) -> tokio::task::Jo
             let adjusted_amount = cmd.amount_sol - total_fee_sol;
 
             // Log to SQLite
-            if let Err(e) = log_trade_to_db(&cmd, adjusted_amount, total_fee_sol, pricing_method) {
+            if let Err(e) = log_trade_to_db(&cmd, adjusted_amount, total_fee_sol, pricing_method, fill_price_sol, &pool_address) {
                 tracing::warn!("[executor] failed to log trade to DB: {e}");
             }
 
             if cfg.dry_run {
                 tracing::info!(
-                    "[executor] DRY_RUN — venue={:?} mint={} raw={:.6}SOL adj={:.6}SOL fees={:.6}SOL",
-                    cmd.venue, cmd.token_mint, cmd.amount_sol, adjusted_amount, total_fee_sol
+                    "[executor] DRY_RUN — venue={:?} mint={} raw={:.6}SOL adj={:.6}SOL fees={:.6}SOL pm={}",
+                    cmd.venue, cmd.token_mint, cmd.amount_sol, adjusted_amount, total_fee_sol, pricing_method
                 );
                 continue;
             }
