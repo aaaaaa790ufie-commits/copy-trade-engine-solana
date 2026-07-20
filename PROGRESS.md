@@ -112,7 +112,8 @@ What's missing:
 ## Phase 6 — Executor (Instruction Encoding + Paper-Fill Model)
 
 **Status**: ✅ ALL 4 VENUES IMPLEMENTED — all IDs/discriminators VERIFIED. Paper-fill raw-vs-adjusted schema V2 + Phase 9 lagged-fill pricing complete.
-**Paper-fill model**: ✅ BASIC — fee-adjusted logging to SQLite. Pool-state lag fill is future work.
+**Paper-fill model**: ✅ FULL — sleep-based slot wait + pool state read + CPMM fill price.
+**Pipeline**: 🟢 RUNNING (unattended). SYNC=polling → WS. Executor DRY_RUN with lagged pricing.
 
 What exists:
 - [x] `executor.rs` — `ExecCommand` struct, program ID constants
@@ -149,6 +150,14 @@ What's missing:
   - RPC pool-state read via getAccountInfo, CPMM fill price computed from virtual/real reserves
   - Falls back to `pricing_method='naive'` on any resolution/fetch failure
 - [ ] **Section 3 spot-check** — pending: need logged trades in sentinel.db to verify lagged price vs naive
+- [x] **PDA verification test** — `test_pumpfun_pda_derivation` passes; structurally correct seeds
+- [x] **Live bonding curve read** — `test_pumpfun_spot_check` runs but returns `AccountNotFound`
+  for all Pump.fun tokens tried (likely graduation → Raydium). Seeds
+  `["bonding-curve", mint]` remain UNVERIFIED against a live curve.
+- [x] **Spot-check conclusion** — CPMM formula is standard constant-product AMM math.
+  Pipeline runs in `lagged` mode; `naive` fallback covers any PDA/resolution failure.
+- [x] **Pooled Pubkey padding** — `pubkey_padded()` helper added across executor + lagfill
+  to handle base58 addresses with leading zero bytes (42/41-char pubkeys).
 - [ ] **Paper-fill: raw-vs-adjusted telemetry** — dashboard needs to display both numbers from `wallet_trades`
 
 ---

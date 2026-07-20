@@ -17,6 +17,22 @@ use solana_sdk::transaction::Transaction;
 use std::str::FromStr;
 use tokio::sync::mpsc::Receiver;
 
+/// Decode a base58 pubkey, correctly padding to 32 bytes.
+/// Solana pubkeys can start with zero bytes that base58 drops;
+/// `Pubkey::from_str` rejects these, but `bs58` + padding handles them.
+fn pubkey_from_str(s: &str) -> Result<Pubkey> {
+    let raw = bs58::decode(s).into_vec()?;
+    if raw.len() == 32 {
+        Ok(Pubkey::from_str(s)?)
+    } else if raw.len() < 32 {
+        let mut padded = vec![0u8; 32 - raw.len()];
+        padded.extend_from_slice(&raw);
+        Ok(Pubkey::new_from_array(padded.try_into().unwrap()))
+    } else {
+        anyhow::bail!("pubkey too long: {} bytes for {s}", raw.len())
+    }
+}
+
 /// Command from risk module to execute a trade.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecCommand {
@@ -46,7 +62,7 @@ fn sol_to_lamports(sol: f64) -> u64 {
 }
 
 fn pk(s: &str) -> Pubkey {
-    Pubkey::from_str(s).expect("hard-coded pubkey is valid")
+    pubkey_from_str(s).expect("hard-coded pubkey is valid")
 }
 
 // ═════════════════════════════════════════════════════════════════
@@ -363,24 +379,16 @@ pub fn spawn(cfg: Config, mut exec_rx: Receiver<ExecCommand>) -> tokio::task::Jo
                         pool_address = addr.to_string();
                         tracing::debug!("[executor] pool resolved: {} -> {}", cmd.token_mint, addr);
 
-                        // 3. Wait configured lag slots
-                        let target_slot = cmd.source_slot + lag_slots as u64;
-                        match lagfill::wait_for_slot(&rpc_client, target_slot, 10_000).await {
-                            Ok(_) => {
-                                // 4. Compute fill price from pool state
-                                let (fill, method) = lagfill::compute_lagged_fill_price(
-                                    &cmd.venue, &cmd.token_mint, &addr,
-                                    cmd.amount_sol, cmd.simulated_price_sol, &rpc_client,
-                                ).await;
-                                fill_price_sol = fill;
-                                pricing_method = method;
-                            }
-                            Err(e) => {
-                                tracing::warn!("[executor] slot wait failed: {e} — naive");
-                                fill_price_sol = cmd.simulated_price_sol;
-                                pricing_method = "naive";
-                            }
-                        }
+                        // 3. Wait expected lag duration (no RPC polling)
+                        lagfill::wait_lag_duration(lag_slots).await;
+
+                        // 4. Compute fill price from pool state (1 RPC: getAccountInfo)
+                        let (fill, method) = lagfill::compute_lagged_fill_price(
+                            &cmd.venue, &cmd.token_mint, &addr,
+                            cmd.amount_sol, cmd.simulated_price_sol, &rpc_client,
+                        ).await;
+                        fill_price_sol = fill;
+                        pricing_method = method;
                     }
                 }
             } else {
