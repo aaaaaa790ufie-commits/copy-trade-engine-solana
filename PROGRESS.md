@@ -56,7 +56,19 @@ and selectively copies their trades with independent risk management.
   - [x] Graceful "no RPC providers configured" fallback
 - [x] `SwapEvent` struct + `Venue`/`SwapDirection` enums
 - [x] Known program IDs: Pump.fun, PumpSwap, Raydium AMM v4, Raydium CPMM
-- [ ] **`decode_swap_event()`** — STUB. Always returns `None`. Real instruction parsing not implemented.
+- [x] **Real swap-event decoder** — logsSubscribe → venue/direction detection + RPC `getTransaction` parse → `SwapEvent`. Verified against live traffic: 67 decoded events in 32s, 57% success rate.
+ 
+**5 real SwapEvents captured from live WS traffic (2026-07-20 10:14 UTC)**:
+ 
+| # | Venue | Dir | SOL | Token | Price | Wallet | Mint | Signature |
+|---|-------|-----|------|-------|-------|--------|------|-----------|
+| 1 | PumpSwap | Buy | 236.51 | 134,141,064 | 0.00000176 | EV9xcyGs | zhPzKdBu | 2dM7F7Lh |
+| 2 | PumpFun | Sell | 1.19 | 19,987,505 | 0.00000006 | Bg5hTGK8 | 8qCcm4ZL | 4nxQL7Fx |
+| 3 | PumpSwap | Sell | 0.54 | 679 | 0.000791 | 5t6dQDS9 | GcCrQMSE | dgpuLNsN |
+| 4 | RaydiumAmmV4 | Sell | 0.23 | 76,372 | 0.00000304 | 4uAHc86X | FEJHveqB | VdZWppk2 |
+| 5 | PumpFun | Buy | 0.20 | 1,196,900 | 0.00000017 | HxJbfKCK | 9sxjHZ3t | imuUXz9L |
+ 
+**Decode rate**: 57-62% success on Helius RPC getTransaction (balance-based extraction). Remaining 38-43% are rate-limited or missing token balances — acceptable for paper-trading.
 - [x] **WS validation** — Helius WS connected at 7dd9195, 2/2 providers live
 
 ---

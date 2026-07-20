@@ -80,6 +80,25 @@ pub fn spawn(
     tokio::spawn(async move {
         tracing::info!("[filter] starting");
 
+        // Ensure the wallet_scores table exists
+        if let Ok(conn) = rusqlite::Connection::open("sentinel.db") {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS wallet_scores (
+                    row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    wallet_address TEXT NOT NULL UNIQUE,
+                    tier TEXT NOT NULL DEFAULT 'C',
+                    edge_score REAL NOT NULL DEFAULT 0.0
+                );
+                -- Seed seed wallets as Tier A if table was just created
+                INSERT OR IGNORE INTO wallet_scores (wallet_address, tier, edge_score)
+                VALUES
+                    ('5tzFkiKscXHK5ZXCGbXZxwQBwwiDmP3p1WAMEREbmwBK', 'A', 1.0),
+                    ('DRpbwCxPqvNsKGMNchPkBLFxDSrGPzau7kRbnvjyYvK', 'A', 1.0),
+                    ('F6UoN7AoUCcWMctBE26E1BQrYGEk8GnGPAhq8aY9X3eK', 'A', 1.0),
+                    ('GjEtGzHafgEWsUF3WVqCjYLczHGB1hLrYjhPJ7CoynJp', 'A', 1.0);"
+            ).unwrap_or_else(|e| tracing::warn!("[filter] schema init: {e}"));
+        }
+
         let mut cache = TierCache {
             tiers: std::collections::HashMap::new(),
             last_refresh: Instant::now(),
