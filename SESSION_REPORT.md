@@ -14,26 +14,36 @@
 | **Pricing** | `lagged` when pool readable, fallback `naive` |
 | **Seed wallets** | 4 in `discovery/seed_wallets.txt` |
 | **RPC** | Helius (WS+HTTP) + public fallback |
+| **WS confirmed working** | ✅ Python test: logsNotification received within 15s of subscribe |
+| **Decoder** | ⚠️ STUB — `decode_swap_event()` returns `None`; WS reader logs at `debug!` only
 
 ## Wall-Clock Duration
 
-_Will be filled after run._
+Pipeline started 2026-07-20T04:05 UTC. Still running as of writing.
+Duration: ~X seconds so far.
 
 ## Trade Counts
 
-_Will be filled after run, broken down by venue and pricing_method._
+**0 trades logged.** `wallet_trades` table empty.
+
+Root cause: `decode_swap_event()` in `ingest.rs:284` is a stub that returns
+`None` unconditionally. The WS reader task logs incoming messages at `debug!`
+level but never calls `decode_swap_event` or routes events to the filter
+chain. See PROGRESS.md Phase 3 status.
 
 ## Wallet Tiers
 
-_Will be filled after run._
+N/A — no transactions processed.
 
 ## PnL Comparison
 
-_Will be filled after run: raw vs lagged+fee+slippage-adjusted._
+N/A — no trades to compare.
 
 ## Errors / Rate-Limit Hits / Blocked Venues
 
-_Will be filled after run._
+- No errors observed during run. WS connections stable.
+- No rate-limit hits (only 1 HTTP RPC call total — for the test).
+- All 4 venues subscribed on 2 WS providers.
 
 ## Still UNVERIFIED
 
@@ -60,6 +70,11 @@ The following items remain unverified or unresolved as of this session:
    `lag_slots × 400ms + 200ms`. If Solana slot times differ significantly from
    400ms, the actual lag will be off (but pricing still uses whatever pool state
    is current at the actual RPC call, so no more wrong than `naive`).
+
+6. **Event decoder (`decode_swap_event`)** — the entire pipeline depends on
+   this function being implemented. Currently a stub returning `None`. Without
+   it, no `SwapEvent`s reach the filter/risk/executor chain and no trades are
+   ever logged. This is the single largest gap in the pipeline.
 
 ## Command to Restart
 
