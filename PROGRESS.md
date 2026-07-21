@@ -57,6 +57,7 @@ and selectively copies their trades with independent risk management.
 - [x] `SwapEvent` struct + `Venue`/`SwapDirection` enums
 - [x] Known program IDs: Pump.fun, PumpSwap, Raydium AMM v4, Raydium CPMM
 - [x] **Real swap-event decoder** — logsSubscribe → venue/direction detection + RPC `getTransaction` parse → `SwapEvent`. Verified against live traffic: 67 decoded events in 32s, 57% success rate.
+- [x] **Per-wallet mentions subscriptions** — changed from program-wide `mentions: [program_id]` to per-wallet `mentions: [wallet]` for each tracked wallet. Helius connection: 4 per-wallet subs only. Public connection: 4 per-wallet + 4 program-level (fallback discovery). See `subscribe_wallet_logs()` at line 627.
  
 **5 real SwapEvents captured from live WS traffic (2026-07-20 10:14 UTC)**:
  

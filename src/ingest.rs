@@ -9,11 +9,11 @@
 use crate::config::Config;
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::{mpsc::Sender, RwLock, Semaphore};
+use tokio::sync::{mpsc::Sender, Semaphore};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
@@ -147,6 +147,47 @@ fn build_providers(cfg: &Config) -> Vec<RpcProvider> {
     providers
 }
 
+/// Load tracked wallet addresses (Tier A or B) from the SQLite database.
+/// These are used for per-wallet mentions subscriptions.
+fn load_tracked_wallets(db_path: &str) -> Vec<String> {
+    let conn = match Connection::open(db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("[ingest] cannot open sentinel.db: {e}");
+            return Vec::new();
+        }
+    };
+
+    let query = "SELECT wallet_address FROM wallet_scores WHERE tier IN ('A', 'B')";
+    let mut stmt = match conn.prepare(query) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("[ingest] wallet_scores table not available: {e}");
+            return Vec::new();
+        }
+    };
+
+    let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("[ingest] failed to query wallet_scores: {e}");
+            return Vec::new();
+        }
+    };
+
+    let wallets: Vec<String> = rows.filter_map(|r| r.ok()).collect();
+
+    if wallets.is_empty() {
+        tracing::warn!("[ingest] no tracked wallets found in wallet_scores — no per-wallet subscriptions will be created");
+    } else {
+        tracing::info!(
+            "[ingest] loaded {} tracked wallets (Tier A/B) for per-wallet mentions subscriptions",
+            wallets.len()
+        );
+    }
+    wallets
+}
+
 // ── WebSocket RPC pool ───────────────────────────────────────────
 
 struct WsConnection {
@@ -193,10 +234,19 @@ impl WsPool {
         }
     }
 
-    /// Subscribe to logsSubscribe for all tracked programs on all connections.
-    async fn subscribe_all(&self) {
+    /// Subscribe to logsSubscribe for tracked wallets on all connections.
+    /// Each wallet gets its own subscription via mentions: [wallet_address].
+    /// On the public (non-Helius) connection, also keeps one program-level
+    /// subscription as a fallback discovery mechanism.
+    async fn subscribe_all(&self, wallets: &[String]) {
         for conn in &self.connections {
-            subscribe_program_logs(conn, TRACKED_PROGRAMS).await;
+            // Per-wallet mentions subscriptions (targeted, cheap)
+            subscribe_wallet_logs(conn, wallets).await;
+
+            // On public WS only: keep one program-level subscription for discovery
+            if conn.provider.name == "public" {
+                subscribe_program_logs(conn, TRACKED_PROGRAMS).await;
+            }
         }
     }
 }
@@ -570,8 +620,43 @@ fn parse_logs_notification(text: &str) -> Option<(String, u64, Vec<String>, u64)
     Some((signature, slot, logs, subscription))
 }
 
-// ── Subscribe helper ──────────────────────────────────────────────
+// ── Subscribe helpers ────────────────────────────────────────────
 
+/// Subscribe to logsSubscribe for tracked wallet addresses.
+/// Each wallet gets its own subscription so the WS only delivers
+/// transactions that involve that wallet.
+async fn subscribe_wallet_logs(conn: &WsConnection, wallets: &[String]) {
+    for wallet_addr in wallets {
+        let subscribe_request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "logsSubscribe",
+            "params": [
+                { "mentions": [wallet_addr] },
+                { "commitment": "processed" }
+            ]
+        });
+
+        let msg = Message::Text(
+            serde_json::to_string(&subscribe_request).unwrap().into()
+        );
+
+        if let Err(e) = conn.write.send(msg) {
+            tracing::error!(
+                "[ingest] failed to subscribe to wallet {} on {}: {:?}",
+                &wallet_addr[..12], conn.provider.name, e
+            );
+        } else {
+            tracing::info!(
+                "[ingest] subscribed to wallet {} on {}",
+                &wallet_addr[..12], conn.provider.name
+            );
+        }
+    }
+}
+
+/// Subscribe to logsSubscribe for program IDs (fallback discovery mode).
+/// Used on the public WS connection only.
 async fn subscribe_program_logs(conn: &WsConnection, programs: &[&str]) {
     for program_id in programs {
         let subscribe_request = serde_json::json!({
@@ -625,11 +710,15 @@ pub fn spawn(cfg: Config, tx: Sender<SwapEvent>) -> tokio::task::JoinHandle<()> 
         // Connect to the WS pool, passing swap_tx for the reader tasks
         let pool = WsPool::connect(&providers, &cfg.rpc.backoff, tx.clone()).await;
 
-        // Subscribe to all tracked program IDs
-        pool.subscribe_all().await;
+        // Load tracked wallets from SQLite and subscribe per-wallet
+        let tracked_wallets = load_tracked_wallets("sentinel.db");
+        pool.subscribe_all(&tracked_wallets).await;
 
-        tracing::info!("[ingest] running — subscribed to {} programs on {} provider(s)",
-            TRACKED_PROGRAMS.len(), pool.connections.len());
+        tracing::info!(
+            "[ingest] running — subscribed to {} wallet(s) on {} provider(s)",
+            tracked_wallets.len(),
+            pool.connections.len()
+        );
 
         // Main loop: report decode stats every 30s
         loop {
