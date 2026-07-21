@@ -13,6 +13,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use tokio::sync::{mpsc::Sender, Semaphore};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -298,6 +299,23 @@ fn parse_logs_direction(logs: &[String]) -> Option<(Venue, Option<SwapDirection>
 /// Global rate limiter: at most MAX_CONCURRENT_FETCHES at once.
 static FETCH_SEM: Semaphore = Semaphore::const_new(MAX_CONCURRENT_FETCHES);
 
+/// Global rate limiter: max ~20 req/s across all workers (50ms spacing).
+/// All getTransaction calls go through this shared clock so concurrent
+/// workers never burst past the Helius 25 req/s free tier.
+const RATE_LIMIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Returns the Duration the caller should sleep to maintain the global rate.
+fn global_rate_slot() -> std::time::Duration {
+    static LAST: OnceLock<Mutex<tokio::time::Instant>> = OnceLock::new();
+    let last = LAST.get_or_init(|| Mutex::new(tokio::time::Instant::now()));
+    let mut guard = last.lock().unwrap();
+    let now = tokio::time::Instant::now();
+    let earliest = std::cmp::max(*guard, now);
+    let sleep = if earliest > now { earliest - now } else { std::time::Duration::ZERO };
+    *guard = earliest + RATE_LIMIT_INTERVAL;
+    sleep
+}
+
 /// Fetch a transaction via RPC and decode it into a SwapEvent.
 async fn fetch_and_decode(
     signature: &str,
@@ -307,6 +325,14 @@ async fn fetch_and_decode(
     http_url: &str,
 ) -> Option<SwapEvent> {
     let _permit = FETCH_SEM.acquire().await.ok()?;
+
+    // Global rate limiter: wait for our slot in the shared 50ms clock.
+    // All getTransaction calls across all 4 workers are serialised here,
+    // guaranteeing ≤20 req/s regardless of burst arrival.
+    let wait = global_rate_slot();
+    if wait > std::time::Duration::ZERO {
+        tokio::time::sleep(wait).await;
+    }
 
     let client = reqwest::Client::new();
     let body = serde_json::json!({
@@ -549,8 +575,8 @@ async fn connect_provider(
                                     tracing::info!(
                                         "[ingest] DECODED: venue={:?} dir={:?} wallet={} mint={} sol={:.6} token={:.4} price={:.10} slot={} sig={}",
                                         event.venue, event.direction,
-                                        &event.source_wallet[..8],
-                                        &event.token_mint[..8],
+                                        &event.source_wallet[..event.source_wallet.len().min(8)],
+                                        &event.token_mint[..event.token_mint.len().min(8)],
                                         event.amount_sol,
                                         event.amount_token,
                                         event.price_sol,

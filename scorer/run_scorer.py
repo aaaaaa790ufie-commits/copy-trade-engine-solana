@@ -18,6 +18,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from typing import Any
@@ -67,6 +68,7 @@ def compute_edge_score(trades: list[dict[str, Any]]) -> dict[str, Any]:
             "realized_pnl_sol": 0.0,
             "avg_win_sol": 0.0,
             "avg_loss_sol": 0.0,
+            "tx_per_week": 0.0,
         }
 
     total = len(trades)
@@ -184,7 +186,7 @@ def main() -> None:
     # Get candidate wallets from discovery DB
     disc_conn = discovery_get_connection(args.db_path)
     candidates = disc_conn.execute(
-        "SELECT address FROM candidate_wallets WHERE status IN ('pending', 'tracked') LIMIT ?",
+        "SELECT address FROM candidate_wallets WHERE status IN ('pending', 'tracked', 'retry_rpc') LIMIT ?",
         (args.max_wallets,),
     ).fetchall()
     disc_conn.close()
@@ -198,47 +200,75 @@ def main() -> None:
     logger.info("Scoring %d wallets...", len(wallet_addresses))
 
     rpc = RpcClient(endpoint=args.rpc_endpoint)
+    # Throttle to stay under Helius 25 req/s / public 10 req/s limits
+    # 150ms → ~6.6 req/s — safe for both providers
+    RPC_CALL_DELAY = 0.15  # seconds between getTransaction calls
     scored: list[dict[str, Any]] = []
 
     for idx, wallet in enumerate(wallet_addresses):
         logger.info("[%d/%d] Scoring %s...", idx + 1, len(wallet_addresses), wallet[:12])
 
+        # Reset error counter per wallet
+        rpc._error_count = 0
+
         # Fetch recent transaction signatures for this wallet
         sigs = rpc.get_signatures_for_address(wallet, limit=min(args.max_tx_per_wallet, 100))
 
+        # Determine scoring_status BEFORE filling defaults
+        # rpc_failed: sigs empty AND RPC returned errors
+        # no_data: sigs empty, no RPC errors (wallet genuinely quiet)
+        scoring_status = 'ok'
         if not sigs:
-            logger.debug("No transactions for %s", wallet[:12])
-            continue
+            if rpc.error_count > 0:
+                scoring_status = 'rpc_failed'
+            else:
+                scoring_status = 'no_data'
 
         # Fetch each transaction to decode PnL
         raw_txns = []
-        for sig_info in sigs:
-            tx = rpc.get_transaction(sig_info["signature"])
-            if tx:
-                raw_txns.append(tx)
+        if sigs:
+            for sig_info in sigs:
+                tx = rpc.get_transaction(sig_info["signature"])
+                if tx:
+                    raw_txns.append(tx)
+                else:
+                    # getTransaction returned None — likely 429
+                    pass
+                time.sleep(RPC_CALL_DELAY)  # throttle: stay under rate limit
+
+        # Refine scoring_status: sigs fetched but all getTransaction failed
+        if len(sigs) > 0 and len(raw_txns) == 0 and rpc.error_count > 0:
+            # Every transaction decode failed — almost certainly RPC rate limit
+            scoring_status = 'rpc_failed'
 
         # Parse trades from raw transactions using pre/post token balance analysis
         trades = parse_trades_from_wallet(raw_txns, wallet)
 
         if not trades and sigs:
             # No parseable trades — record as empty so scoring gets -1.0 edge
-            logger.debug("No parseable trades for %s — all txns unrecognised", wallet[:12])
+            if scoring_status != 'rpc_failed':
+                logger.debug("No parseable trades for %s — all txns unrecognised", wallet[:12])
 
         # Compute score
         stats = compute_edge_score(trades)
         tier = assign_tier(stats)
 
+        # If scoring_status is 'rpc_failed', set tier to 'N/A' (not really scored)
+        display_tier = tier
+        if scoring_status == 'rpc_failed':
+            display_tier = 'N/A'
+
         logger.info(
-            "  → tier=%s edge=%.4f win_rate=%.2f payoff=%.2f pnl=%.4f tx/wk=%.1f",
-            tier, stats["edge_score"], stats["win_rate"],
+            "  → tier=%s edge=%.4f win_rate=%.2f payoff=%.2f pnl=%.4f tx/wk=%.1f status=%s",
+            display_tier, stats["edge_score"], stats["win_rate"],
             stats["payoff_ratio"], stats["realized_pnl_sol"],
-            stats["tx_per_week"],
+            stats["tx_per_week"], scoring_status,
         )
 
         upsert_wallet_score(
             conn=conn,
             wallet_address=wallet,
-            tier=tier,
+            tier=display_tier,
             edge_score=stats["edge_score"],
             payoff_ratio=stats["payoff_ratio"],
             win_rate=stats["win_rate"],
@@ -249,26 +279,36 @@ def main() -> None:
             avg_win_sol=stats["avg_win_sol"],
             avg_loss_sol=stats["avg_loss_sol"],
             tx_per_week=stats["tx_per_week"],
+            scoring_status=scoring_status,
         )
-        scored.append({"wallet": wallet, "tier": tier, "edge_score": stats["edge_score"]})
+        scored.append({
+            "wallet": wallet,
+            "tier": display_tier,
+            "edge_score": stats["edge_score"],
+            "scoring_status": scoring_status,
+        })
 
     # ── Cluster check (Section 6) ────────────────────────────────
     # Flag wallets with >90% buy timestamp correlation
     # (simplified: same wallet won't correlate with itself in v1)
     logger.info(
-        "Scoring complete: %d wallets scored (%d tier A, %d tier B, %d tier C)",
+        "Scoring complete: %d wallets scored (%d tier A, %d tier B, %d tier C, %d N/A — rpc_failed)",
         len(scored),
         sum(1 for s in scored if s["tier"] == "A"),
         sum(1 for s in scored if s["tier"] == "B"),
         sum(1 for s in scored if s["tier"] == "C"),
+        sum(1 for s in scored if s["tier"] == "N/A"),
     )
 
     # Update candidate_wallets status from scoring
     for s in scored:
         if s["tier"] == "A":
             conn.execute("UPDATE candidate_wallets SET status = 'tracked' WHERE address = ?", (s["wallet"],))
-        elif s["tier"] == "C":
+        elif s["tier"] == "C" and s.get("scoring_status") != "rpc_failed":
+            # Only drop genuinely low-scored wallets, not RPC failures
             conn.execute("UPDATE candidate_wallets SET status = 'dropped' WHERE address = ?", (s["wallet"],))
+        elif s.get("scoring_status") == "rpc_failed":
+            conn.execute("UPDATE candidate_wallets SET status = 'retry_rpc' WHERE address = ?", (s["wallet"],))
     conn.commit()
 
     conn.close()

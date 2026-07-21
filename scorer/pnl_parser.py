@@ -16,7 +16,7 @@ LAMPORTS_PER_SOL = 1_000_000_000
 DEX_PROGRAMS = {
     "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P": "pump_fun",
     "pAMMPxompa13c2qojFgUGSXXysyLLCUmSXwG8M7fKtM": "pump_swap",
-    "675kPX9MHTjS2zt1qfr1NYyze2V9cWzmRpJnLkzFY7": "raydium_amm_v4",
+    "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8": "raydium_amm_v4",
     "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP": "raydium_cpmm",
 }
 
@@ -46,7 +46,13 @@ def _sol_balance_delta(tx: dict[str, Any], acct_idx: int) -> float:
 def _token_deltas(
     tx: dict[str, Any], acct_idx: int
 ) -> dict[str, float]:
-    """Return dict {mint: amount_delta} for the wallet's token accounts.
+    """Return dict {mint: amount_delta} for ALL token accounts in the txn.
+
+    In Solana, the wallet's ATA may have a DIFFERENT accountIndex than
+    the wallet itself (common in PumpSwap, Jupiter, etc.). So we look
+    at ALL token balance changes, not just those at acct_idx.
+    `_classify_trade` matches direction via SOL delta + token delta
+    regardless of which account index holds the tokens.
 
     Positive delta = wallet received tokens (buy).
     Negative delta = wallet sent tokens (sell).
@@ -57,23 +63,20 @@ def _token_deltas(
 
     pre_by_mint: dict[str, float] = {}
     for entry in pre_tokens:
-        if entry.get("accountIndex") != acct_idx:
-            continue
         mint = entry.get("mint", "")
         ui = entry.get("uiTokenAmount", {})
         amount = ui.get("uiAmount")
         if amount is not None and mint:
-            pre_by_mint[mint] = amount
+            # Sum across all account indices for this mint
+            pre_by_mint[mint] = pre_by_mint.get(mint, 0.0) + amount
 
     post_by_mint: dict[str, float] = {}
     for entry in post_tokens:
-        if entry.get("accountIndex") != acct_idx:
-            continue
         mint = entry.get("mint", "")
         ui = entry.get("uiTokenAmount", {})
         amount = ui.get("uiAmount")
         if amount is not None and mint:
-            post_by_mint[mint] = amount
+            post_by_mint[mint] = post_by_mint.get(mint, 0.0) + amount
 
     deltas: dict[str, float] = {}
     all_mints = set(pre_by_mint.keys()) | set(post_by_mint.keys())

@@ -32,7 +32,7 @@ def init_scorer_tables(conn: sqlite3.Connection | None = None) -> None:
             CREATE TABLE IF NOT EXISTS wallet_scores (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 wallet_address TEXT NOT NULL UNIQUE,
-                tier TEXT NOT NULL,            -- 'A', 'B', 'C'
+                tier TEXT NOT NULL,            -- 'A', 'B', 'C', 'N/A'
                 edge_score REAL DEFAULT 0.0,
                 payoff_ratio REAL DEFAULT 0.0,
                 win_rate REAL DEFAULT 0.0,
@@ -43,10 +43,15 @@ def init_scorer_tables(conn: sqlite3.Connection | None = None) -> None:
                 avg_win_sol REAL DEFAULT 0.0,
                 avg_loss_sol REAL DEFAULT 0.0,
                 tx_per_week REAL DEFAULT 0.0,
+                scoring_status TEXT DEFAULT 'pending',
                 window_start TEXT,
                 window_end TEXT,
                 last_scored_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
+
+            -- Migrate existing tables: add scoring_status if missing
+            -- (Safe no-op if column already exists)
+            CREATE TABLE IF NOT EXISTS wallet_scores_v2 AS SELECT *, 'pending' AS scoring_status FROM wallet_scores WHERE 0;
 
             -- Per-trade breakdowns for a wallet (used for scoring)
             -- SCHEMA V2: added raw_amount_sol, pricing_method, inserted_at, signal_slot, pool_address
@@ -104,22 +109,44 @@ def upsert_wallet_score(
     avg_win_sol: float,
     avg_loss_sol: float,
     tx_per_week: float,
+    scoring_status: str = 'pending',
     window_start: str | None = None,
     window_end: str | None = None,
 ) -> None:
-    """Insert or update a wallet's score."""
+    """Insert or update a wallet's score.
+
+    scoring_status:
+        'ok' — successfully scored with sufficient data
+        'no_data' — no transaction history found (wallet is quiet)
+        'rpc_failed' — RPC returned errors (429/timeout), needs retry
+        'pending' — not yet processed
+    """
+    # Don't REPLACE a valid ok score with an rpc_failed one
+    old = conn.execute(
+        "SELECT scoring_status FROM wallet_scores WHERE wallet_address = ?",
+        (wallet_address,),
+    ).fetchone()
+    if old and old[0] in ('ok', 'no_data') and scoring_status == 'rpc_failed':
+        # Keep the existing valid score, just update last_scored_at
+        conn.execute(
+            "UPDATE wallet_scores SET last_scored_at = datetime('now') WHERE wallet_address = ?",
+            (wallet_address,),
+        )
+        conn.commit()
+        return
+
     conn.execute(
         """INSERT OR REPLACE INTO wallet_scores
            (wallet_address, tier, edge_score, payoff_ratio, win_rate,
             total_trades, win_count, loss_count, realized_pnl_sol,
             avg_win_sol, avg_loss_sol, tx_per_week,
-            window_start, window_end, last_scored_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+            scoring_status, window_start, window_end, last_scored_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
         (
             wallet_address, tier, edge_score, payoff_ratio, win_rate,
             total_trades, win_count, loss_count, realized_pnl_sol,
             avg_win_sol, avg_loss_sol, tx_per_week,
-            window_start, window_end,
+            scoring_status, window_start, window_end,
         ),
     )
     conn.commit()

@@ -1,6 +1,6 @@
 # Sentinel — Session Report
 
-> **Auto-generated.** Updated 2026-07-20 10:35 UTC.
+> **Auto-generated.** Updated 2026-07-21 08:16 UTC.
 
 ## Run Parameters
 
@@ -15,49 +15,69 @@
 | **RPC** | Helius (WS+HTTP) + public fallback |
 | **WS** | ✅ 2/2 connected (helius + public) |
 | **Decoder** | ✅ Live — `fetch_and_decode()` via RPC `getTransaction` |
-| **WS subscription** | ✅ Per-wallet `mentions` (Helius: 4 wallets only; Public: 4 wallets + 4 programs) |
+| **WS subscription** | ✅ Per-wallet `mentions` (Helius: 4 wallets; Public: 4 wallets) |
 
-## Decode Stats (live counter)
+## Decode Stats (live counter from this run)
 
 | Metric | Value |
 |--------|-------|
-| **Decoded OK** | 498 |
-| **Decoded None** | 1382 |
-| **Success rate** | 26.5% |
-| **Uptime** | ~16 min |
-| **Avg rate** | ~31 events/min |
+| **Decoded OK** | 19 |
+| **Decoded None** | 8756 |
+| **Success rate** | 0.2% |
+| **Uptime** | ~7 min |
+| **Avg rate** | ~21 events/min |
 
-"None" cases are rate-limited RPC calls or transactions without meaningful
-token balance changes (e.g. txn errors, wrapper transactions). The ingest
-pipeline is healthy — events arrive and are processed continuously.
+"None" cases are 429 rate-limited `getTransaction` calls. Helius HTTP
+hit its free-tier 25 req/s cap — shared between the Rust pipeline,
+Python discovery (20 tokens), and Python scorer (13 wallets × up to
+100 txns each).
 
 ## Trade Counts
 
-**0 trades logged.** `wallet_trades` table not yet created.
+**0 trades logged.** `wallet_trades` table not created.
 
-`wallet_scores` exists with **4 Tier-A wallets** seeded from
-`discovery/seed_wallets.txt`. None of the 498 decoded events matched these 4
-addresses as `source_wallet`. The filter correctly classifies all events as
-**Tier C — not tracked** and does not forward them to the executor.
+All 19 decoded events came from non-tracked wallets (Gygj9QQb,
+AK2HKRnL, 8uXNFoqQ, 6AmzvTc5, etc.). The filter correctly classifies
+them as Tier C — not forwarded to executor.
 
-## Wallet Tiers
+## Wallet Tiers (updated by scorer)
 
 | Tier | Wallets | Source |
 |------|---------|--------|
 | A | 4 | `discovery/seed_wallets.txt` (hardcoded seed) |
 | B | 0 | — |
-| C | N/A | Default for all non-tracked wallets |
+| C | 7 | Scored by `run_scorer.py` (all edge=-1.0 — no trade data b/c 429) |
+| Pending | 6 | Not scored (429 on getSignaturesForAddress) |
 
-## PnL Comparison
+Scorer updated candidate_wallets: 7 dropped (C), 6 still pending.
 
-N/A — no trades to compare.
+## Discovery Results (this run via Helius HTTP)
+
+| Metric | Value |
+|--------|-------|
+| **Tokens discovered** | 21 |
+| **Candidate wallets found** | 13 (+12 new) |
+| **Cross-ref wallets (≥2 tokens)** | 2 |
+| **Seed wallets loaded** | 0 |
+| **429 rate-limit hits** | Heavy (started on token 5/20, got worse) |
+
+### Bugs fixed during this session
+
+- `discovery/early_buyer.py`: Raydium AMM v4 program ID was 42-char
+  invalid (base58 leading-zero truncation). Fixed to correct 43-char
+  `675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8`.
+- `scorer/pnl_parser.py`: Same Raydium AMM v4 program ID bug fixed.
 
 ## Errors / Rate-Limit Hits / Blocked Venues
 
-- No errors observed. WS connections stable.
-- 1382 decode "none" cases are rate-limiting on `getTransaction` — expected
-  behaviour under Helius free tier.
-- All 4 venues producing events (PumpFun, PumpSwap, RaydiumAmmV4 visible in logs).
+- Helius HTTP severely rate-limited (429) on `getTransaction` and
+  `getSignaturesForAddress` — 25 req/s free tier saturated by 3
+  concurrent consumers (pipeline + discovery + scorer).
+- Helius WS closed once at 05:14:49 UTC (`Away` — inactivity timeout).
+  Reconnect observed (pipeline continued printing stats).
+- Public RPC (`api.mainnet-beta.solana.com`) also 429s on Python scripts.
+- All 4 venues producing events (PumpFun, PumpSwap visible in decoded log).
+- No fatal errors; pipeline stayed up.
 
 ## Still UNVERIFIED
 
@@ -65,6 +85,7 @@ N/A — no trades to compare.
 2. **Raydium API v3 fallback** — not tested under load.
 3. **Position manager TP/SL** — in-memory only; SQLite persistence not implemented.
 4. **Live slot-based lag** — `wait_lag_duration()` uses fixed 400ms/slot estimate.
+5. **Executor sendTransaction** — blocked on DRY_RUN + LIVE=false.
 
 ## Command to Restart
 

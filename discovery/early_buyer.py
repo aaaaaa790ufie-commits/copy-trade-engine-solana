@@ -17,7 +17,7 @@ PUBLIC_RPC_URL = "https://api.mainnet-beta.solana.com"
 # Known DEX program IDs on Solana (used to filter for swap instructions)
 PUMP_FUN_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 PUMP_SWAP_PROGRAM = "pAMMPxompa13c2qojFgUGSXXysyLLCUmSXwG8M7fKtM"
-RAYDIUM_AMM_V4 = "675kPX9MHTjS2zt1qfr1NYyze2V9cWzmRpJnLkzFY7"
+RAYDIUM_AMM_V4 = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
 RAYDIUM_CPMM = "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP"
 
 SWAP_PROGRAMS = {
@@ -37,6 +37,11 @@ class RpcClient:
             "Content-Type": "application/json",
         })
         self._req_count = 0
+        self._error_count = 0
+
+    @property
+    def error_count(self) -> int:
+        return self._error_count
 
     def _call(self, method: str, params: list | None = None) -> dict[str, Any] | None:
         payload = {
@@ -56,6 +61,7 @@ class RpcClient:
             return data
         except requests.exceptions.RequestException as e:
             logger.warning("RPC call failed [%s]: %s", method, e)
+            self._error_count += 1
             return None
 
     def get_signatures_for_address(
