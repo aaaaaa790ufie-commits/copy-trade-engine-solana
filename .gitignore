@@ -34,6 +34,8 @@ logs/
 
 # --- SQLite (data, keep schema only) ---
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 .venv/
 
