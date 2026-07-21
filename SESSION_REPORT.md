@@ -15,6 +15,7 @@
 | **RPC** | Helius (WS+HTTP) + public fallback |
 | **WS** | ✅ 2/2 connected (helius + public) |
 | **Decoder** | ✅ Live — `fetch_and_decode()` via RPC `getTransaction` |
+| **WS subscription** | ✅ Per-wallet `mentions` (Helius: 4 wallets only; Public: 4 wallets + 4 programs) |
 
 ## Decode Stats (live counter)
 

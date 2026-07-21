@@ -36,3 +36,6 @@ logs/
 *.db
 *.sqlite
 .venv/
+
+# --- Sentinel secrets (WARP/WireGuard keys) ---
+sentinel-secrets/
