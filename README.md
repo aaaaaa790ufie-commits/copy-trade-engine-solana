@@ -1,57 +1,85 @@
-# Sentinel — Solana Smart-Money Copy-Trading Engine
+# Sentinel: GMGN Smart Money Cluster Trader
 
-A self-hosted engine that discovers smart wallets from public on-chain data,
-tracks their trades in near-real-time using only **free-tier RPC**, scores them
-on realized PnL distribution (not just win-rate), and selectively mirrors trades
-with independent risk management.
+Sentinel now has one job: find **converging Smart Money buys**, pass qualified
+signals into the existing Rust risk/execution path, and paper-trade them safely.
 
-## Architecture
+## Simplified architecture
 
-| Layer | Language | Role |
-|---|---|---|
-| **Hot path** (ingest → filter → risk → executor → position manager) | Rust | Latency-critical; single binary, internal modules via tokio mpsc |
-| **Discovery / Scoring / Telemetry** | Python | Periodic batch jobs, pandas/numpy for analytics |
-| **Dashboard** | Python (Streamlit) | Read-only local web UI over SQLite |
-| **Data feed** | — | Free-tier RPC pool, WebSocket-first (no paid gRPC) |
-| **Persistence** | — | SQLite |
+```text
+GMGN Smart Money feed
+  -> GMGN 30d wallet stats
+  -> keep wallets with win rate >= 70%, >= 10 buys, positive realized PnL
+  -> require >= 3 distinct qualified wallets whose latest action is BUY
+     on the same token inside 30 minutes
+  -> SQLite signal queue
+  -> Rust filter -> risk -> executor (DRY_RUN)
+```
+
+The old `discovery/` and `scorer/` code remains for reference, but is no longer
+on the runtime path. Raw Solana `logsSubscribe` decoding is also removed from
+the runtime path. GMGN handles wallet discovery, venue coverage, activity, and
+wallet statistics; Sentinel owns the strategy, risk rules, and execution.
+
+## Important statistical note
+
+Three wallets with a 70% historical win rate do **not** automatically imply a
+97.3% success probability. Their decisions can be correlated, they may copy the
+same source, and historical win rate is not calibrated probability. Sentinel
+uses the three-wallet cluster as a strong ranking signal, not a probability
+claim. Paper results must prove the edge before live trading is considered.
+
+## Setup
+
+```bash
+npm install -g gmgn-cli
+gmgn-cli config
+python gmgn/monitor.py --self-test
+cargo test
+```
+
+The read-only monitor needs a GMGN API key. It does **not** need
+`GMGN_PRIVATE_KEY`, does not use GMGN swap endpoints, and cannot submit a trade.
+GMGN OpenAPI is currently open to users; its documented limiter is a leaky
+bucket, so the monitor polls every 15 seconds and caches wallet stats for 15
+minutes.
+
+## Run
+
+Open two terminals from the repository root:
+
+```bash
+# Terminal 1: produce qualified cluster signals
+python gmgn/monitor.py
+
+# Terminal 2: consume signals and paper-trade
+cargo run --release
+```
+
+Defaults are configurable with environment variables:
+
+```text
+GMGN_MIN_CLUSTER_WALLETS=3
+GMGN_MIN_WINRATE=0.70
+GMGN_MIN_BUYS_30D=10
+GMGN_MIN_REALIZED_PROFIT_USD=0
+GMGN_CLUSTER_WINDOW_SECONDS=1800
+GMGN_POLL_SECONDS=15
+GMGN_STATS_TTL_SECONDS=900
+GMGN_FEED_LIMIT=200
+SENTINEL_DB=sentinel.db
+```
 
 ## Safety
 
-- **Double-gate**: `DRY_RUN=true` + `LIVE=false` by default. A real
-  `sendTransaction` requires **both** `DRY_RUN=false` AND `LIVE=true`.
-- **Isolated wallet**: a fresh keypair is generated during setup. The agent never
-  funds it. The codebase never touches the Fasol wallet or any other external
-  wallet.
-- **Position limits**: hard caps in `config.toml` (max concurrent positions, max
-  % per position, max % per source wallet), enforced in code.
-- **Security pre-checks**: LP lock, mint authority, freeze authority, holder
-  concentration — checked before every buy.
-- **`.gitignore`** blocks `.env*`, `*.key`, `wallets/`.
+`config.toml` still defaults to `dry_run=true` and `live=false`. A real
+transaction requires both gates to be deliberately reversed. Keep them as-is
+until the new GMGN pipeline has accumulated enough non-zero paper trades to
+measure win rate after lag, fees, and slippage.
 
-## Free-Tier Constraint
+## What is intentionally not solved yet
 
-Every data source and RPC endpoint in this project is reachable on a free tier.
-No paid infrastructure is required. WebSocket subscriptions (`logsSubscribe`)
-over free-tier keys (Helius, Alchemy, QuickNode, GetBlock) provide push-based
-data without burning request quota.
-
-See `config.toml` for the RPC pool configuration and priority weighting.
-
-## Quick Start
-
-```bash
-# 1. Copy and populate environment
-cp .env.example .env
-# Edit .env with your free-tier API keys (see .env.example for variable names)
-
-# 2. Run discovery (Python)
-cd discovery && pip install -r requirements.txt && python run_discovery.py
-
-# 3. Build and run the engine (Rust)
-cd .. && cargo build --release && ./target/release/sentinel
-```
-
-## Phases
-
-See [PROGRESS.md](./PROGRESS.md) for current build status and [config.toml](./config.toml)
-for all tunable parameters.
+GMGN reports token price in USD while the Rust paper-fill model expects SOL per
+token. The monitor does not mislabel USD as SOL. It sends a zero reference price
+and lets the executor resolve the pool and calculate an on-chain fill; unresolved
+pools remain unsuitable for PnL analysis and should be treated as telemetry,
+not evidence of profitability.
