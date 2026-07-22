@@ -67,15 +67,34 @@ Discovered tokens: **21** (from discovery run).
 
 ## JDJW8HQPGBdF — Status
 
-- **No new trades detected** during this session (~16 h pipeline runtime + previous runs).
-- Pipeline subscribed per-wallet on both Helius and public WS.
-- Zero log notifications received for this address. If the wallet made a trade,
-  Helius `mentions` subscription would trigger → 50ms rate-limited getTransaction
-  → decode → filter (match tracked wallet) → risk → executor (dry-run) → wallet_trades.
-- Expected at 112.8 tx/wk ≈ 16 trades/day ≈ 0.67 tx/h. Over 16 h, P(0) ≈ 50%
-  (Poisson). Statistically consistent with an inactive window.
-- Edge score +35.55 is real but concentration risk flagged: 86% PnL from 2
-  trades out of 96. The wallet is not consistently profitable.
+**Wallet IS active.** 10 confirmed transactions on 2026-07-21 between
+**09:02–09:16 UTC** (1h12m after v6 pipeline started). All successful
+(getSignaturesForAddress confirms no errors).
+
+**Per-wallet `mentions` subscription IS working.** Helius WS sends
+logsNotifications when JDJW8HQPGBdF appears in transaction logs.
+But the pipeline's `parse_logs_direction` **silently drops** notifications
+for unknown programs — and JDJW8 no longer trades on PumpFun/PumpSwap/Raydium.
+
+**Venue change detected: OKX DEX v3**
+- Program ID: `proVF4pMXVaYqmy4NjniPh4pqKNfMmsihgd4wdkCX3u`
+- This is **OKX DEX v3** (Solana DEX aggregator/router).
+- All 10 recent txns went through OKX, **none** through tracked venues.
+- The 112.8 tx/wk / 96-trade history came from an earlier period when
+  JDJW8 traded on PumpFun (scorer found them via getSignaturesForAddress).
+
+**Pipeline behaviour for JDJW8:**
+- Helius WS → notification arrives → `parse_logs_direction(&logs)` → venue
+  not recognized → silent drop (no DECODE_OK or DECODE_NONE increment).
+- This is correct by design: the pipeline only decodes swaps on tracked
+  programs. JDJW8's OKX trades are invisible to it.
+- The 1,778 DECODED OK entries came exclusively from the public WS
+  program-level subscription (tracked venues). Helius per-wallet
+  notifications were all filtered out.
+
+**Consequence for scoring:** The `edge_score=+35.55` was computed from
+historical PumpFun trades. If the wallet migrated permanently to OKX DEX,
+the score is stale — a re-score on recent data would give a true picture.
 
 ## WARP Tunnel Infrastructure
 
