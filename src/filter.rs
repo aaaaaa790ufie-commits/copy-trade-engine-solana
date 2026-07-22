@@ -1,5 +1,4 @@
-//! Filter — consumes SwapEvent + current wallet tier from SQLite,
-//! decides copy/skip based on strategy config.
+//! Filter: consumes SwapEvent + current wallet tier from SQLite.
 
 use std::time::Instant;
 
@@ -8,7 +7,6 @@ use crate::ingest::SwapEvent;
 use serde::Serialize;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-/// Outcome of the filter decision for a SwapEvent.
 #[derive(Debug, Clone, Serialize)]
 pub struct Decision {
     pub swap: SwapEvent,
@@ -18,7 +16,6 @@ pub struct Decision {
     pub edge_score: f64,
 }
 
-/// In-memory cache of wallet tiers, refreshed from SQLite on an interval.
 struct TierCache {
     tiers: std::collections::HashMap<String, (String, f64)>,
     last_refresh: Instant,
@@ -30,98 +27,72 @@ impl TierCache {
     fn refresh(&mut self) {
         self.last_refresh = Instant::now();
         let before = self.tiers.len();
-
         match rusqlite::Connection::open(&self.db_path) {
             Ok(conn) => {
                 let mut stmt = match conn.prepare(
-                    "SELECT wallet_address, tier, edge_score FROM wallet_scores"
+                    "SELECT wallet_address, tier, edge_score FROM wallet_scores",
                 ) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::warn!("[filter] SQLite prepare failed: {e}");
+                    Ok(stmt) => stmt,
+                    Err(error) => {
+                        tracing::warn!("[filter] SQLite prepare failed: {error}");
                         return;
                     }
                 };
                 let rows = match stmt.query_map([], |row| {
-                    let addr: String = row.get(0)?;
-                    let tier: String = row.get(1)?;
-                    let edge: f64 = row.get(2)?;
-                    Ok((addr, tier, edge))
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, f64>(2)?))
                 }) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::warn!("[filter] SQLite query failed: {e}");
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        tracing::warn!("[filter] SQLite query failed: {error}");
                         return;
                     }
                 };
-
                 self.tiers.clear();
                 for row in rows.flatten() {
                     self.tiers.insert(row.0, (row.1, row.2));
                 }
                 tracing::info!(
-                    "[filter] tier cache refreshed — {} entries (was {})",
-                    self.tiers.len(), before
+                    "[filter] tier cache refreshed: {} entries (was {})",
+                    self.tiers.len(),
+                    before
                 );
             }
-            Err(e) => {
-                tracing::warn!("[filter] cannot open SQLite {p}: {e}", p = self.db_path);
-            }
+            Err(error) => tracing::warn!("[filter] cannot open {}: {error}", self.db_path),
         }
     }
 }
 
-/// Spawn the filter task.
 pub fn spawn(
-    cfg: Config,
+    _cfg: Config,
     mut swap_rx: Receiver<SwapEvent>,
     decision_tx: Sender<Decision>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         tracing::info!("[filter] starting");
-
-        // Ensure the wallet_scores table exists
-        if let Ok(conn) = rusqlite::Connection::open("sentinel.db") {
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS wallet_scores (
-                    row_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    wallet_address TEXT NOT NULL UNIQUE,
-                    tier TEXT NOT NULL DEFAULT 'C',
-                    edge_score REAL NOT NULL DEFAULT 0.0
-                );
-                -- Seed seed wallets as Tier A if table was just created
-                INSERT OR IGNORE INTO wallet_scores (wallet_address, tier, edge_score)
-                VALUES
-                    ('5tzFkiKscXHK5ZXCGbXZxwQBwwiDmP3p1WAMEREbmwBK', 'A', 1.0),
-                    ('DRpbwCxPqvNsKGMNchPkBLFxDSrGPzau7kRbnvjyYvK', 'A', 1.0),
-                    ('F6UoN7AoUCcWMctBE26E1BQrYGEk8GnGPAhq8aY9X3eK', 'A', 1.0),
-                    ('GjEtGzHafgEWsUF3WVqCjYLczHGB1hLrYjhPJ7CoynJp', 'A', 1.0);"
-            ).unwrap_or_else(|e| tracing::warn!("[filter] schema init: {e}"));
-        }
-
+        let refresh_interval = std::time::Duration::from_secs(30);
         let mut cache = TierCache {
             tiers: std::collections::HashMap::new(),
-            last_refresh: Instant::now(),
-            refresh_interval: std::time::Duration::from_secs(30),
-            db_path: "sentinel.db".to_string(),
+            // Force a DB read when the first signal arrives. Previously the
+            // first 30 seconds of signals were classified as Tier C and lost.
+            last_refresh: Instant::now() - refresh_interval,
+            refresh_interval,
+            db_path: std::env::var("SENTINEL_DB").unwrap_or_else(|_| "sentinel.db".into()),
         };
 
         while let Some(swap) = swap_rx.recv().await {
             if cache.last_refresh.elapsed() >= cache.refresh_interval {
                 cache.refresh();
             }
-
-            let (tier, edge_score) = cache.tiers
+            let (tier, edge_score) = cache
+                .tiers
                 .get(&swap.source_wallet)
                 .cloned()
                 .unwrap_or_else(|| ("C".to_string(), 0.0));
-
             let (should_copy, reason) = match tier.as_str() {
-                "A" => (true, format!("Tier A — edge_score={:.3}", edge_score)),
-                "B" => (false, format!("Tier B — watch-only, edge_score={:.3}", edge_score)),
-                _ => (false, "Tier C — not tracked".to_string()),
+                "A" => (true, format!("GMGN qualified: 30d winrate={:.1}%", edge_score * 100.0)),
+                "B" => (false, format!("Tier B watch-only: score={edge_score:.3}")),
+                _ => (false, "Wallet does not meet the GMGN thresholds".to_string()),
             };
-
             let decision = Decision {
                 swap,
                 should_copy,
@@ -129,7 +100,6 @@ pub fn spawn(
                 wallet_tier: tier,
                 edge_score,
             };
-
             if decision_tx.send(decision).await.is_err() {
                 tracing::error!("[filter] decision receiver dropped");
                 break;
