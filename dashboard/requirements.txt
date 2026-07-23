@@ -1,1 +1,1 @@
-requirements.txt
+streamlit>=1.30

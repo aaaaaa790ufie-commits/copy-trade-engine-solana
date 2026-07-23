@@ -6,21 +6,25 @@ Logs clear message for tunnel-down vs other failures.
 """
 
 import json
+import os
 import sys
 import urllib.request
 
-HELIUS_URL = "https://mainnet.helius-rpc.com/?api-key=33a9f314-bc9f-452d-bd59-ced96126d602"
-KEY_PREFIX = "33a9f314"
 
 def check_helius():
     """Return (ok: bool, message: str)."""
+    key = os.getenv("HELIUS_API_KEY") or os.getenv("SOLANA_API_KEY") or ""
+    if not key:
+        return (False, "NO_KEY — set HELIUS_API_KEY (or SOLANA_API_KEY) in the environment")
+    helius_url = f"https://mainnet.helius-rpc.com/?api-key={key}"
+
     payload = json.dumps({
         "jsonrpc": "2.0", "id": 1, "method": "getHealth"
     }).encode('utf-8')
 
     try:
         req = urllib.request.Request(
-            HELIUS_URL,
+            helius_url,
             data=payload,
             headers={'Content-Type': 'application/json'},
             method='POST'

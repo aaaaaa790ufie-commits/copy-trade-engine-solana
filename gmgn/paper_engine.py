@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import json, logging, os, sqlite3, subprocess, time
+import json, logging, os, shutil, sqlite3, subprocess, time
 from collections import defaultdict
 LOG=logging.getLogger("paper-engine")
 DB=os.getenv("SENTINEL_DB","sentinel.db"); BUDGET=float(os.getenv("PAPER_BUDGET_SOL","0.1")); STAKE=float(os.getenv("PAPER_TRADE_SIZE_SOL","0.025")); WINDOW=int(os.getenv("GMGN_CLUSTER_WINDOW_SECONDS","1800")); COOLDOWN=int(os.getenv("GMGN_COOLDOWN_SECONDS","420")); POLL=int(os.getenv("GMGN_POLL_SECONDS","15")); ENTRY=float(os.getenv("GMGN_ENTRY_SCORE","1.0")); TRAIL_ACT=float(os.getenv("TRAILING_ACTIVATE_PCT","25"))/100; TRAIL_DIST=float(os.getenv("TRAILING_DISTANCE_PCT","15"))/100; HARD=float(os.getenv("HARD_STOP_PCT","45"))/100; LIMIT=int(os.getenv("GMGN_FEED_LIMIT","200")); CHAINS=[x.strip() for x in os.getenv("GMGN_CHAINS","sol,robinhood").split(",") if x.strip()]
+MAX_HOLD=int(os.getenv("GMGN_MAX_HOLD_SECONDS","21600")); ZERO_TTL=int(os.getenv("GMGN_ZERO_WINRATE_TTL_SECONDS","3600")); PRICE_TTL=int(os.getenv("GMGN_PRICE_TTL_SECONDS","60"))
 def _find_gmgn():
-    for d in os.environ.get('PATH','').split(';'):
-        cand=os.path.join(d,'gmgn-cli.cmd')
-        if os.path.isfile(cand): return cand
-    return 'gmgn-cli.cmd'
+    for name in ("gmgn-cli","gmgn-cli.cmd"):
+        found=shutil.which(name)
+        if found: return found
+    return "gmgn-cli.cmd" if os.name=="nt" else "gmgn-cli"
 _GMGN=_find_gmgn()
 def cli(args):
  p=subprocess.run([_GMGN,*args,"--raw"],capture_output=True,text=True,timeout=45)
@@ -33,9 +34,19 @@ def quote(t): return str(t.get("side","")).lower()
 def wr(s): return n(s,"winrate","win_rate","pnl_stat.winrate")
 def weight(x): return .25 if x>=.70 else .0625 if x>=.60 else .03125 if x>=.50 else 0.0
 def px(t): return n(t,"price_now","price_usd","price")
+_price_cache={}
+def token_price(chain,mint):
+ """Independent mark price from `token info` (cached PRICE_TTL sec); 0.0 when unavailable."""
+ now=time.time(); hit=_price_cache.get((chain,mint))
+ if hit and now-hit[0]<PRICE_TTL: return hit[1]
+ p=0.0
+ try:
+  row=(list_rows(cli(["token","info","--chain",chain,"--address",mint])) or [{}])[0]; p=n(row,"price","price_usd","usd_price","price_now")
+ except Exception as e: LOG.warning("price %s %s: %s",chain,mint[:8],e)
+ _price_cache[(chain,mint)]=(now,p); return p
 def allowed(t,chain):
  if chain=="robinhood": return True
- raw=" ".join(str(t.get(k,"")) for k in ("launchpad","launchpad_platform","migrated_pool_exchange")).lower(); b=t.get("base_token") if isinstance(t.get("base_token"),dict) else {}; return "pump" in raw+" "+str(b.get("launchpad",""))
+ raw=" ".join(str(t.get(k,"")) for k in ("launchpad","launchpad_platform","migrated_pool_exchange")); b=t.get("base_token") if isinstance(t.get("base_token"),dict) else {}; return "pump" in (raw+" "+str(b.get("launchpad",""))).lower()
 def init(c):
  c.execute("PRAGMA journal_mode=WAL")
  c.executescript("""
@@ -60,6 +71,7 @@ def get_stats(chain,wallets):
    a=str(r.get("address") or r.get("wallet") or r.get("wallet_address") or r.get("maker") or "")
    if a: out[a]=r
   if len(b)==1 and b[0] not in out and len(got)==1: out[b[0]]=got[0]
+  time.sleep(0.25)
  return out
 STATS_REFRESH_SEC=int(os.getenv("GMGN_STATS_TTL_SECONDS","3600"))
 def refresh_wallet_stats(c,chain,now):
@@ -70,11 +82,13 @@ def refresh_wallet_stats(c,chain,now):
   wrv=wr(data); buys=n(data,"buy","buy_count","sell","sell_count","trades_7d")
   if wrv>0 and buys>0:
    old=c.execute("SELECT winrate FROM wallet_watch WHERE address=? AND chain=?",(w,chain)).fetchone()
-   c.execute("UPDATE wallet_watch SET winrate=?,last_seen=?,updated_at=? WHERE address=? AND chain=?",(wrv,int(n(data,"last_timestamp")),now,w,chain))
+   ls=int(n(data,"last_timestamp"))
+   if ls>0: c.execute("UPDATE wallet_watch SET winrate=?,last_seen=?,updated_at=? WHERE address=? AND chain=?",(wrv,ls,now,w,chain))
+   else: c.execute("UPDATE wallet_watch SET winrate=?,updated_at=? WHERE address=? AND chain=?",(wrv,now,w,chain))
    upd+=1
    if wrv>=.70 and old and old[0]<.70: new_high.append((w[:8],wrv))
   elif wrv>0 and buys==0:
-   c.execute("UPDATE wallet_watch SET winrate=?,updated_at=? WHERE address=? AND chain=?",(min(wrv,0.49),now,w,chain))
+   c.execute("UPDATE wallet_watch SET winrate=?,updated_at=? WHERE address=? AND chain=?",(wrv,now,w,chain))
  if upd:
   LOG.info("refreshed stats for %d/%d stale wallets on %s",upd,len(addrs),chain)
   if new_high: emit(c,"WALLET",f"{chain} | NEW high-winrate: {len(new_high)} wallet(s) >=70%, ex: {new_high[0][0]}... {new_high[0][1]*100:.0f}%")
@@ -106,6 +120,15 @@ def discover_wallets(c,chain,now):
   for w in addrs:
    if not is_blacklisted(c,w,chain): c.execute("INSERT OR IGNORE INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) VALUES(?,?,?,?,?,?)",(w,chain,"gmgn",now,0,now))
   LOG.info("discovered +%d wallets from KOL/traders on %s",len(addrs),chain)
+def cleanup_wallets(c,chain,now):
+ """Blacklist only wallets with a CONFIRMED sub-50% winrate. Zero-winrate rows (stats never
+ fetched yet) are dropped after ZERO_TTL without blacklisting, so a transient API failure or
+ rate limit can never blacklist a good wallet forever. Manual seeds are never auto-dropped."""
+ low=c.execute("SELECT address FROM wallet_watch WHERE chain=? AND winrate>0 AND winrate<0.50",(chain,)).fetchall()
+ if low:
+  c.executemany("INSERT OR IGNORE INTO wallet_blacklist(address,chain,blacklisted_at,reason) VALUES(?,?,?,'low_winrate')",[(r[0],chain,now) for r in low])
+  c.execute("DELETE FROM wallet_watch WHERE chain=? AND winrate>0 AND winrate<0.50",(chain,))
+ c.execute("DELETE FROM wallet_watch WHERE chain=? AND winrate=0 AND source!='manual_seed' AND ?-updated_at>=?",(chain,now,ZERO_TTL))
 def cooling(c,m,chain,now):
  r=c.execute("SELECT until_ts FROM paper_cooldowns WHERE token_mint=? AND chain=?",(m,chain)).fetchone(); return bool(r and r[0]>now)
 def enter(c,chain,trades,weights,now):
@@ -117,23 +140,31 @@ def enter(c,chain,trades,weights,now):
  for m,ws in latest.items():
   buys={w:t for w,t in ws.items() if quote(t)=="buy"}; score=sum(weights[w] for w in buys)
   if score<ENTRY or m in open_mints or cooling(c,m,chain,now): continue
-  p=px(max(buys.values(),key=stamp)) if buys else 0; a=c.execute("SELECT budget_sol,bankrupt FROM paper_account WHERE id=1").fetchone()
+  p=token_price(chain,m) or (px(max(buys.values(),key=stamp)) if buys else 0); a=c.execute("SELECT budget_sol,bankrupt FROM paper_account WHERE id=1").fetchone()
   if p<=0 or not a: continue
-  if a[1] or a[0]<STAKE:
-   if not a[1]: c.execute("UPDATE paper_account SET bankrupt=1,updated_at=? WHERE id=1",(now,)); emit(c,"BANKRUPT","обнулились в papertrading, скажи это своему hermes agent, будем разбираться по сделкам")
+  if a[0]<STAKE:
+   fully_invested=bool(c.execute("SELECT 1 FROM paper_positions WHERE status='open' LIMIT 1").fetchone())
+   if not a[1] and not fully_invested: c.execute("UPDATE paper_account SET bankrupt=1,updated_at=? WHERE id=1",(now,)); emit(c,"BANKRUPT","обнулились в papertrading, скажи это своему hermes agent, будем разбираться по сделкам")
    continue
   c.execute("UPDATE paper_account SET budget_sol=budget_sol-?,updated_at=? WHERE id=1",(STAKE,now)); c.execute("INSERT INTO paper_positions(token_mint,chain,entry_price,peak_price,stake_sol,opened_at,signal_score,wallet_count,status) VALUES(?,?,?,?,?,?,?,?,?)",(m,chain,p,p,STAKE,now,score,len(buys),"open")); c.execute("INSERT INTO paper_trades(token_mint,chain,action,price,stake_sol,reason,wallet_count,signal_score,event_ts) VALUES(?,?,?,?,?,?,?,?,?)",(m,chain,"ENTRY",p,STAKE,"weighted cluster",len(buys),score,now)); emit(c,"ENTRY",f"{chain} {m} | wallets={len(buys)} score={score:.4f} | {STAKE:.4f} SOL")
 def exits(c,chain,trades,now):
  latest={}
  for t in trades:
   if allowed(t,chain) and mint(t) and px(t)>0 and (mint(t) not in latest or stamp(t)>stamp(latest[mint(t)])): latest[mint(t)]=t
- positions=c.execute("SELECT token_mint,entry_price,peak_price,stake_sol,signal_score,wallet_count FROM paper_positions WHERE chain=? AND status=?",(chain,"open")).fetchall()
- for m,entry,peak,stake,score,count in positions:
-  t=latest.get(m)
-  if not t: continue
-  current=px(t); peak=max(peak,current); change=current/entry-1; c.execute("UPDATE paper_positions SET peak_price=? WHERE token_mint=?",(peak,m)); hard=change<=-HARD; trailing=(peak/entry-1)>=TRAIL_ACT and current<=peak*(1-TRAIL_DIST)
-  if hard or trailing:
-   reason="hard stop -45%" if hard else "trailing stop 15%"; pnl=stake*change; c.execute("UPDATE paper_account SET budget_sol=budget_sol+?,updated_at=? WHERE id=1",(stake+pnl,now)); c.execute("UPDATE paper_positions SET status='closed' WHERE token_mint=?",(m,)); c.execute("INSERT INTO paper_cooldowns VALUES(?,?,?) ON CONFLICT(token_mint,chain) DO UPDATE SET until_ts=excluded.until_ts",(m,chain,now+COOLDOWN)); c.execute("INSERT INTO paper_trades(token_mint,chain,action,price,stake_sol,pnl_sol,pnl_pct,reason,wallet_count,signal_score,event_ts) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(m,chain,"EXIT",current,stake,pnl,change,reason,count,score,now)); emit(c,"EXIT",f"{chain} {m} | {change*100:.2f}% ({pnl:+.5f} SOL) | {reason}")
+ positions=c.execute("SELECT token_mint,entry_price,peak_price,stake_sol,signal_score,wallet_count,opened_at FROM paper_positions WHERE chain=? AND status=?",(chain,"open")).fetchall()
+ for m,entry,peak,stake,score,count,opened in positions:
+  current=token_price(chain,m)
+  if current<=0 and m in latest: current=px(latest[m])
+  expired=now-opened>=MAX_HOLD
+  if current<=0:
+   if expired: LOG.warning("position %s past max hold but no price available; retrying next cycle",m[:8])
+   continue
+  peak=max(peak,current); change=current/entry-1; c.execute("UPDATE paper_positions SET peak_price=? WHERE token_mint=?",(peak,m)); hard=change<=-HARD; trailing=(peak/entry-1)>=TRAIL_ACT and current<=peak*(1-TRAIL_DIST)
+  if hard or trailing or expired:
+   reason=f"hard stop -{HARD*100:.0f}%" if hard else (f"trailing stop {TRAIL_DIST*100:.0f}%" if trailing else f"max hold {MAX_HOLD//3600}h"); pnl=stake*change; c.execute("UPDATE paper_account SET budget_sol=budget_sol+?,updated_at=? WHERE id=1",(stake+pnl,now)); c.execute("UPDATE paper_positions SET status='closed' WHERE token_mint=?",(m,)); c.execute("INSERT INTO paper_cooldowns VALUES(?,?,?) ON CONFLICT(token_mint,chain) DO UPDATE SET until_ts=excluded.until_ts",(m,chain,now+COOLDOWN)); c.execute("INSERT INTO paper_trades(token_mint,chain,action,price,stake_sol,pnl_sol,pnl_pct,reason,wallet_count,signal_score,event_ts) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(m,chain,"EXIT",current,stake,pnl,change,reason,count,score,now)); emit(c,"EXIT",f"{chain} {m} | {change*100:.2f}% ({pnl:+.5f} SOL) | {reason}")
+ a=c.execute("SELECT budget_sol,bankrupt FROM paper_account WHERE id=1").fetchone()
+ if a and a[1] and a[0]>=STAKE:
+  c.execute("UPDATE paper_account SET bankrupt=0,updated_at=? WHERE id=1",(now,)); emit(c,"RECOVERY",f"баланс {a[0]:.5f} SOL снова покрывает ставку {STAKE:.4f} — paper-трейдинг возобновлён")
 def cycle(c):
  now=int(time.time())
  for chain in CHAINS:
@@ -157,11 +188,7 @@ def cycle(c):
   enter(c,chain,trades,weights,now); exits(c,chain,trades,now)
   refresh_wallet_stats(c,chain,now)
   discover_wallets(c,chain,now)
-  # blacklist + remove low-quality wallets
-  low=c.execute("SELECT address FROM wallet_watch WHERE chain=? AND ((winrate>0 AND winrate<0.50) OR (winrate=0 AND ?-updated_at>=60))",(chain,now)).fetchall()
-  if low:
-   c.executemany("INSERT OR IGNORE INTO wallet_blacklist(address,chain,blacklisted_at,reason) VALUES(?,?,?,'low_winrate')",[(r[0],chain,now) for r in low])
-   c.execute("DELETE FROM wallet_watch WHERE chain=? AND ((winrate>0 AND winrate<0.50) OR (winrate=0 AND ?-updated_at>=60))",(chain,now))
+  cleanup_wallets(c,chain,now)
  c.commit()
  LOG.info("[cycle] wallets=%d events_total=%d",c.execute("SELECT COUNT(*) FROM wallet_watch").fetchone()[0],c.execute("SELECT COUNT(*) FROM engine_events").fetchone()[0])
 def main():
