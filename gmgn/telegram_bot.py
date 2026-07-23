@@ -5,7 +5,7 @@ import json, os, sqlite3, time, urllib.parse, urllib.request
 DB=os.getenv("SENTINEL_DB","sentinel.db"); TOKEN=os.getenv("TELEGRAM_BOT_TOKEN",""); CHAT=os.getenv("TELEGRAM_CHAT_ID","")
 def api(method,data=None):
     url=f"https://api.telegram.org/bot{TOKEN}/{method}"; body=urllib.parse.urlencode(data or {}).encode()
-    with urllib.request.urlopen(urllib.request.Request(url,body=body),timeout=30) as r: return json.loads(r.read())
+    with urllib.request.urlopen(urllib.request.Request(url,data=body),timeout=30) as r: return json.loads(r.read())
 def text(c,command):
     a=c.execute("SELECT budget_sol,initial_budget_sol,bankrupt FROM paper_account WHERE id=1").fetchone()
     if command=="/status":
