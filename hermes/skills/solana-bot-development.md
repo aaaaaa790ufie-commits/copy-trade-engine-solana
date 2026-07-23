@@ -67,6 +67,68 @@ let jitter_ms = (nanos % 51) as u64;
 tokio::time::sleep(std::time::Duration::from_millis(250 + jitter_ms)).await;
 ```
 
+## GMGN Engine (Paper Trading)
+
+Python-based engine using GMGN Smart Money/KOL feeds + token traders for mass wallet discovery and paper trading.
+
+### Architecture
+
+```
+Terminal 1: python gmgn/run_engine.py   # signal producer + paper engine
+Terminal 2: python gmgn/telegram_bot.py  # Telegram notifier
+```
+
+Single shared SQLite (`sentinel.db`), no RPC keys needed. GMGN API via `gmgn-cli`.
+
+### Wallet discovery (3 sources)
+
+| Source | Frequency | Weight | New/cycle |
+|--------|-----------|--------|-----------|
+| `track smartmoney` | every 15s | 1 | ~0-5 |
+| `track kol` | every 15s | 1 | ~5-20 |
+| `token traders` on trending tokens | every 60s | 5×3 | ~30-150 |
+
+`discover_wallets()` runs every cycle and inserts new addresses into `wallet_watch`.
+
+### Stats refresh
+
+`refresh_wallet_stats()` picks up all stale/zero-winrate wallets, calls `gmgn-cli portfolio stats` (batched 10 at a time, weight 3), and updates:
+- `winrate` — from `pnl_stat.winrate` (decimal, 0.0-1.0)
+- `updated_at` — only if `wrv > 0 AND buys > 0`
+- Inactive wallets (buys=0): forced to `min(wrv, 0.49)` for cleanup
+
+### Wallet blacklist + cleanup
+
+Each cycle, wallets with `winrate < 50%` are deleted AND blacklisted:
+
+```python
+low = c.execute(
+    "SELECT address FROM wallet_watch WHERE chain=? AND "
+    "((winrate>0 AND winrate<0.50) OR (winrate=0 AND ?-updated_at>=60))",
+    (chain, now),
+).fetchall()
+if low:
+    c.executemany(
+        "INSERT OR IGNORE INTO wallet_blacklist(address,chain,blacklisted_at,reason) "
+        "VALUES(?,?,?,'low_winrate')",
+        [(r[0], chain, now) for r in low],
+    )
+    c.execute("DELETE FROM wallet_watch WHERE chain=? AND ...", (chain, now))
+```
+
+All 3 discovery paths check `is_blacklisted()` before inserting — deleted wallets never return.
+
+### Telegram bot
+
+Long-polling bot that forwards `engine_events` (ENTRY/EXIT/WALLET/BANKRUPT) to the configured chat:
+
+```python
+_last_event = c.execute("SELECT COALESCE(MAX(id),0) FROM engine_events").fetchone()[0]
+# ... push_events loop
+```
+
+Commands: `/status` (balance + positions), `/trades` (last 10), `/wallets` (count per source).
+
 ## Warning: Per-wallet notification venue filter
 
 `mentions: [wallet]` subscription DELIVERS notifications. But `parse_logs_direction()` checks logs for known DEX programs. If the wallet uses a **non-tracked venue** (e.g. OKX DEX v3, Jupiter), the notification is silently dropped — no counter incremented.
