@@ -6,6 +6,17 @@ DB=os.getenv("SENTINEL_DB","sentinel.db"); TOKEN=os.getenv("TELEGRAM_BOT_TOKEN",
 def api(method,data=None):
     url=f"https://api.telegram.org/bot{TOKEN}/{method}"; body=urllib.parse.urlencode(data or {}).encode()
     with urllib.request.urlopen(urllib.request.Request(url,data=body),timeout=30) as r: return json.loads(r.read())
+_last_event=0
+def push_events(c):
+    global _last_event
+    rows=c.execute("SELECT id,kind,message FROM engine_events WHERE id>? ORDER BY id",(_last_event,)).fetchall()
+    for eid,kind,msg in rows:
+        _last_event=eid
+        if kind in ("ENTRY","EXIT","WALLET","BANKRUPT"):
+            try:
+                api("sendMessage",{"chat_id":CHAT,"text":f"{kind}: {msg}"})
+                time.sleep(.3)
+            except Exception as ex: print("push fail:",ex)
 def text(c,command):
     a=c.execute("SELECT budget_sol,initial_budget_sol,bankrupt FROM paper_account WHERE id=1").fetchone()
     if command=="/status":
@@ -30,4 +41,5 @@ def main():
                 if CHAT and chat!=CHAT: continue
                 api("sendMessage",{"chat_id":chat,"text":text(c,cmd)})
         except Exception as e: print("telegram:",e); time.sleep(5)
+        push_events(c)
 if __name__=="__main__": main()
