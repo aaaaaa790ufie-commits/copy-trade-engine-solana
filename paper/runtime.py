@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
+import subprocess
 import time
 from .account import PaperAccount
 from .gmgn_source import fetch_signals
@@ -11,9 +13,19 @@ POLL_SECONDS = int(os.getenv('GMGN_POLL_SECONDS', '15'))
 COOLDOWN_SECONDS = int(os.getenv('TOKEN_COOLDOWN_SECONDS', '600'))
 
 
-def price_provider(token: str, chain: str) -> float:
-    # Runtime hook: replace with GMGN token-info or a market data endpoint.
-    # Returning 0 is fail-closed: no synthetic exits and no fake PnL.
+def _current_price(token: str, chain: str) -> float:
+    proc = subprocess.run(['gmgn-cli', 'token', 'info', '--chain', chain, '--address', token, '--raw'], capture_output=True, text=True, timeout=30)
+    if proc.returncode:
+        return 0.0
+    lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    try:
+        value = json.loads(lines[-1])
+        while isinstance(value, dict) and 'data' in value:
+            value = value['data']
+        if isinstance(value, dict):
+            return float(value.get('price') or value.get('price_usd') or 0.0)
+    except (ValueError, IndexError, json.JSONDecodeError):
+        pass
     return 0.0
 
 
@@ -34,12 +46,12 @@ def run(db_path: str = 'sentinel.db') -> None:
                 opened = account.open_position(signal.token, signal.chain, signal.price_usd, signal.strength, len(signal.wallets))
                 if opened:
                     print(f"ENTRY UTC={now} chain={signal.chain} token={signal.token} strength={signal.strength:.5f} wallets={len(signal.wallets)}")
-            closed = account.mark_prices(price_provider)
+            closed = account.mark_prices(_current_price)
             for token, pnl, reason in closed:
                 last_exit[('sol', token)] = now
                 print(f"EXIT UTC={now} token={token} pnl={pnl:+.6f} reason={reason}")
             if account.balance() < 0.025:
-                print('PAPER_ACCOUNT_ZERO_OR_UNDERFUNDED: tell Hermes agent to inspect the trade journal')
+                print('мы обнулились в papertrading, скажи это своему hermes agent, будем разбираться по сделкам')
                 break
         except Exception as exc:
             print(f'paper runtime error: {exc}')
