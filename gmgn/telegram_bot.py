@@ -12,7 +12,7 @@ def push_events(c):
     rows=c.execute("SELECT id,kind,message FROM engine_events WHERE id>? ORDER BY id",(_last_event,)).fetchall()
     for eid,kind,msg in rows:
         _last_event=eid
-        if kind in ("ENTRY","EXIT","WALLET","BANKRUPT","RECOVERY"):
+        if kind in ("ENTRY","EXIT","WALLET","WALLET_BUY","BANKRUPT","RECOVERY"):
             try:
                 api("sendMessage",{"chat_id":CHAT,"text":f"{kind}: {msg}"})
                 time.sleep(.3)
