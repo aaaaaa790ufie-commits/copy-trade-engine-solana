@@ -39,14 +39,14 @@ def allowed(t,chain):
 def init(c):
  c.execute("PRAGMA journal_mode=WAL")
  c.executescript("""
- CREATE TABLE IF NOT EXISTS paper_account(id INTEGER PRIMARY KEY CHECK(id=1),budget_sol REAL NOT NULL,initial_budget_sol REAL NOT NULL,bankrupt INTEGER NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL);
- INSERT OR IGNORE INTO paper_account VALUES(1,0.1,0.1,0,strftime('%s','now'));
- CREATE TABLE IF NOT EXISTS paper_positions(token_mint TEXT PRIMARY KEY,chain TEXT NOT NULL,entry_price REAL NOT NULL,peak_price REAL NOT NULL,stake_sol REAL NOT NULL,opened_at INTEGER NOT NULL,signal_score REAL NOT NULL,wallet_count INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'open');
- CREATE TABLE IF NOT EXISTS paper_trades(id INTEGER PRIMARY KEY AUTOINCREMENT,token_mint TEXT NOT NULL,chain TEXT NOT NULL,action TEXT NOT NULL,price REAL NOT NULL,stake_sol REAL NOT NULL,pnl_sol REAL NOT NULL DEFAULT 0,pnl_pct REAL NOT NULL DEFAULT 0,reason TEXT NOT NULL,wallet_count INTEGER NOT NULL,signal_score REAL NOT NULL,event_ts INTEGER NOT NULL);
- CREATE TABLE IF NOT EXISTS paper_cooldowns(token_mint TEXT NOT NULL,chain TEXT NOT NULL,until_ts INTEGER NOT NULL,PRIMARY KEY(token_mint,chain));
- CREATE TABLE IF NOT EXISTS wallet_watch(address TEXT NOT NULL,chain TEXT NOT NULL,source TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,last_seen INTEGER NOT NULL DEFAULT 0,winrate REAL NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL,PRIMARY KEY(address,chain));
- CREATE TABLE IF NOT EXISTS engine_events(id INTEGER PRIMARY KEY AUTOINCREMENT,event_ts INTEGER NOT NULL,kind TEXT NOT NULL,message TEXT NOT NULL);
- """); c.commit()
+CREATE TABLE IF NOT EXISTS paper_account(id INTEGER PRIMARY KEY CHECK(id=1),budget_sol REAL NOT NULL,initial_budget_sol REAL NOT NULL,bankrupt INTEGER NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL);
+INSERT OR IGNORE INTO paper_account VALUES(1,0.1,0.1,0,strftime('%s','now'));
+CREATE TABLE IF NOT EXISTS paper_positions(token_mint TEXT PRIMARY KEY,chain TEXT NOT NULL,entry_price REAL NOT NULL,peak_price REAL NOT NULL,stake_sol REAL NOT NULL,opened_at INTEGER NOT NULL,signal_score REAL NOT NULL,wallet_count INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'open');
+CREATE TABLE IF NOT EXISTS paper_trades(id INTEGER PRIMARY KEY AUTOINCREMENT,token_mint TEXT NOT NULL,chain TEXT NOT NULL,action TEXT NOT NULL,price REAL NOT NULL,stake_sol REAL NOT NULL,pnl_sol REAL NOT NULL DEFAULT 0,pnl_pct REAL NOT NULL DEFAULT 0,reason TEXT NOT NULL,wallet_count INTEGER NOT NULL,signal_score REAL NOT NULL,event_ts INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS paper_cooldowns(token_mint TEXT NOT NULL,chain TEXT NOT NULL,until_ts INTEGER NOT NULL,PRIMARY KEY(token_mint,chain));
+CREATE TABLE IF NOT EXISTS wallet_watch(address TEXT NOT NULL,chain TEXT NOT NULL,source TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,last_seen INTEGER NOT NULL DEFAULT 0,winrate REAL NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL,PRIMARY KEY(address,chain));
+CREATE TABLE IF NOT EXISTS engine_events(id INTEGER PRIMARY KEY AUTOINCREMENT,event_ts INTEGER NOT NULL,kind TEXT NOT NULL,message TEXT NOT NULL);
+"""); c.commit()
 def emit(c,kind,msg): LOG.info("%s: %s",kind,msg); c.execute("INSERT INTO engine_events VALUES(NULL,?,?,?)",(int(time.time()),kind,msg))
 def get_stats(chain,wallets):
  out={}
@@ -72,12 +72,37 @@ def refresh_wallet_stats(c,chain,now):
    upd+=1
    if wrv>=.70 and old and old[0]<.70: new_high.append((w[:8],wrv))
   elif wrv>0 and buys==0:
-   # inactive wallet — mark as low quality
    c.execute("UPDATE wallet_watch SET winrate=?,updated_at=? WHERE address=? AND chain=?",(min(wrv,0.49),now,w,chain))
  if upd:
   LOG.info("refreshed stats for %d/%d stale wallets on %s",upd,len(addrs),chain)
   if new_high: emit(c,"WALLET",f"{chain} | NEW high-winrate: {len(new_high)} wallet(s) >=70%, ex: {new_high[0][0]}... {new_high[0][1]*100:.0f}%")
  return upd
+_DISCOV_CYCLE=0
+def discover_wallets(c,chain,now):
+ global _DISCOV_CYCLE; _DISCOV_CYCLE+=1; addrs=set()
+ try:
+  d=cli(["track","kol","--chain",chain,"--limit","100"])
+  for t in (d.get("list") or (d if isinstance(d,list) else [])):
+   w=wallet(t)
+   if w: addrs.add(w)
+ except Exception as e: LOG.warning("kol %s: %s",chain,e)
+ if _DISCOV_CYCLE%4==0:
+  try:
+   d=cli(["market","trending","--chain",chain,"--interval","1h","--raw"])
+   items=(d.get("data",{}).get("rank") or d.get("list") or [])[:3]
+   for item in items:
+    ta=item.get("address","")
+    if not ta: continue
+    try:
+     tr=cli(["token","traders","--chain",chain,"--address",ta,"--limit","50","--order-by","profit"])
+     for t in (tr.get("data",{}).get("list") or tr.get("list") or []):
+      addr=t.get("wallet_address","") or t.get("address","")
+      if addr: addrs.add(addr)
+    except Exception as ex: LOG.warning("traders %s: %s",ta[:8],ex)
+  except Exception as e: LOG.warning("trending %s: %s",chain,e)
+ if addrs:
+  for w in addrs: c.execute("INSERT OR IGNORE INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) VALUES(?,?,?,?,?,?)",(w,chain,"gmgn",now,0,now))
+  LOG.info("discovered +%d wallets from KOL/traders on %s",len(addrs),chain)
 def cooling(c,m,chain,now):
  r=c.execute("SELECT until_ts FROM paper_cooldowns WHERE token_mint=? AND chain=?",(m,chain)).fetchone(); return bool(r and r[0]>now)
 def enter(c,chain,trades,weights,now):
@@ -125,7 +150,7 @@ def cycle(c):
    emit(c,"WALLET",f"{chain} | +{new_w} новых, всего {after} | {s}")
   enter(c,chain,trades,weights,now); exits(c,chain,trades,now)
   refresh_wallet_stats(c,chain,now)
-  # remove wallets that failed qualification (winrate<50% with data)
+  discover_wallets(c,chain,now)
   c.execute("DELETE FROM wallet_watch WHERE chain=? AND ((winrate>0 AND winrate<0.50) OR (winrate=0 AND ?-updated_at>=3600))",(chain,now))
  c.commit()
  LOG.info("[cycle] wallets=%d events_total=%d",c.execute("SELECT COUNT(*) FROM wallet_watch").fetchone()[0],c.execute("SELECT COUNT(*) FROM engine_events").fetchone()[0])
