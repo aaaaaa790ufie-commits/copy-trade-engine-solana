@@ -71,6 +71,9 @@ def refresh_wallet_stats(c,chain,now):
    c.execute("UPDATE wallet_watch SET winrate=?,last_seen=?,updated_at=? WHERE address=? AND chain=?",(wrv,int(n(data,"last_timestamp")),now,w,chain))
    upd+=1
    if wrv>=.70 and old and old[0]<.70: new_high.append((w[:8],wrv))
+  elif wrv>0 and buys==0:
+   # inactive wallet — mark as low quality
+   c.execute("UPDATE wallet_watch SET winrate=?,updated_at=? WHERE address=? AND chain=?",(min(wrv,0.49),now,w,chain))
  if upd:
   LOG.info("refreshed stats for %d/%d stale wallets on %s",upd,len(addrs),chain)
   if new_high: emit(c,"WALLET",f"{chain} | NEW high-winrate: {len(new_high)} wallet(s) >=70%, ex: {new_high[0][0]}... {new_high[0][1]*100:.0f}%")
@@ -122,6 +125,8 @@ def cycle(c):
    emit(c,"WALLET",f"{chain} | +{new_w} новых, всего {after} | {s}")
   enter(c,chain,trades,weights,now); exits(c,chain,trades,now)
   refresh_wallet_stats(c,chain,now)
+  # remove wallets that failed qualification (winrate<50% with data)
+  c.execute("DELETE FROM wallet_watch WHERE chain=? AND winrate>0 AND winrate<0.50 AND source!='manual_seed'",(chain,))
  c.commit()
  LOG.info("[cycle] wallets=%d events_total=%d",c.execute("SELECT COUNT(*) FROM wallet_watch").fetchone()[0],c.execute("SELECT COUNT(*) FROM engine_events").fetchone()[0])
 def main():
