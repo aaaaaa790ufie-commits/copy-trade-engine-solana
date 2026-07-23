@@ -30,7 +30,7 @@ def wallet(t): return str(t.get("maker") or t.get("wallet") or "")
 def mint(t): return str(t.get("base_address") or t.get("token_address") or "")
 def stamp(t): return int(n(t,"timestamp","trigger_at"))
 def quote(t): return str(t.get("side","")).lower()
-def wr(s): return n(s,"winrate","win_rate","pnl_winrate")
+def wr(s): return n(s,"winrate","win_rate","pnl_stat.winrate")
 def weight(x): return .25 if x>=.70 else .0625 if x>=.60 else .03125 if x>=.50 else 0.0
 def px(t): return n(t,"price_now","price_usd","price")
 def allowed(t,chain):
@@ -59,6 +59,20 @@ def get_stats(chain,wallets):
    if a: out[a]=r
   if len(b)==1 and b[0] not in out and len(got)==1: out[b[0]]=got[0]
  return out
+STATS_REFRESH_SEC=int(os.getenv("GMGN_STATS_TTL_SECONDS","3600"))
+def refresh_wallet_stats(c,chain,now):
+ stale=c.execute("SELECT address FROM wallet_watch WHERE chain=? AND (winrate=0 OR ?-updated_at>=?) AND source!='manual_seed' LIMIT 200",(chain,now,STATS_REFRESH_SEC)).fetchall()
+ if not stale: return 0
+ addrs=[r[0] for r in stale]
+ st=get_stats(chain,addrs)
+ upd=0
+ for w,data in st.items():
+  wrv=wr(data)
+  if wrv>0:
+   c.execute("UPDATE wallet_watch SET winrate=?,last_seen=?,updated_at=? WHERE address=? AND chain=?",(wrv,int(num(data,"last_timestamp",default=0)),now,w,chain))
+   upd+=1
+ if upd: LOG.info("refreshed stats for %d/%d stale wallets on %s",upd,len(addrs),chain)
+ return upd
 def cooling(c,m,chain,now):
  r=c.execute("SELECT until_ts FROM paper_cooldowns WHERE token_mint=? AND chain=?",(m,chain)).fetchone(); return bool(r and r[0]>now)
 def enter(c,chain,trades,weights,now):
@@ -92,7 +106,7 @@ def cycle(c):
  for chain in CHAINS:
   try: trades=list_rows(cli(["track","smartmoney","--chain",chain,"--limit",str(LIMIT)]))
   except Exception as e: LOG.warning("feed %s: %s",chain,e); continue
-  makers=sorted({wallet(t) for t in trades if wallet(t)}); stats=get_stats(chain,makers); weights={w:weight(wr(s)) for w,s in stats.items() if wr(s)>=.50 and n(s,"buy_count","buy_count_7d","trades_7d")>0}
+  makers=sorted({wallet(t) for t in trades if wallet(t)}); stats=get_stats(chain,makers); weights={w:weight(wr(s)) for w,s in stats.items() if wr(s)>=.50 and n(s,"buy","buy_count","buy_count_7d","trades_7d")>0}
   before=c.execute("SELECT COUNT(*) FROM wallet_watch WHERE chain=? AND active=1",(chain,)).fetchone()[0]; new_w=0; high_wr=[]
   for w,z in weights.items():
    exist=c.execute("SELECT 1 FROM wallet_watch WHERE address=? AND chain=?",(w,chain)).fetchone()
@@ -105,8 +119,9 @@ def cycle(c):
    s=f"70%+: {len(high_wr)}"+(f" ex: {high_wr[0][0]}... {high_wr[0][1]*100:.0f}%" if high_wr else "")
    emit(c,"WALLET",f"{chain} | +{new_w} новых, всего {after} | {s}")
   enter(c,chain,trades,weights,now); exits(c,chain,trades,now)
+  refresh_wallet_stats(c,chain,now)
  c.commit()
- LOG.info("[cycle] feed=%d makers=%d qualified=%d wallets=%d events_1m=%d",len(trades),len(makers),len(weights),c.execute("SELECT COUNT(*) FROM wallet_watch").fetchone()[0],c.execute("SELECT COUNT(*) FROM engine_events WHERE event_ts>=?",(int(time.time())-60,)).fetchone()[0])
+ LOG.info("[cycle] wallets=%d events_total=%d",c.execute("SELECT COUNT(*) FROM wallet_watch").fetchone()[0],c.execute("SELECT COUNT(*) FROM engine_events").fetchone()[0])
 def main():
  import argparse
  ap=argparse.ArgumentParser(); ap.add_argument("--once",action="store_true"); ap.add_argument("--db-path",default=DB); a=ap.parse_args(); logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s"); c=sqlite3.connect(a.db_path,timeout=30); init(c)
