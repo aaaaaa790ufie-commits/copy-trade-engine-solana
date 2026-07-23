@@ -1,85 +1,69 @@
-# Sentinel: GMGN Smart Money Cluster Trader
+# Sentinel: weighted GMGN paper trader
 
-Sentinel now has one job: find **converging Smart Money buys**, pass qualified
-signals into the existing Rust risk/execution path, and paper-trade them safely.
+The runtime is now intentionally small: GMGN Smart Money activity -> wallet
+stats -> weighted convergence -> paper account -> Telegram journal. The old
+raw-RPC discovery/decoder remains in the repository as legacy code, but is not
+used by the paper runtime.
 
-## Simplified architecture
+## Strategy
 
-```text
-GMGN Smart Money feed
-  -> GMGN 30d wallet stats
-  -> keep wallets with win rate >= 70%, >= 10 buys, positive realized PnL
-  -> require >= 3 distinct qualified wallets whose latest action is BUY
-     on the same token inside 30 minutes
-  -> SQLite signal queue
-  -> Rust filter -> risk -> executor (DRY_RUN)
-```
+Only BUY events from wallets active within the last 7 days are considered.
+Wallets with GMGN 30d win rate below 50% are ignored. Signal weight is:
 
-The old `discovery/` and `scorer/` code remains for reference, but is no longer
-on the runtime path. Raw Solana `logsSubscribe` decoding is also removed from
-the runtime path. GMGN handles wallet discovery, venue coverage, activity, and
-wallet statistics; Sentinel owns the strategy, risk rules, and execution.
+| win rate | weight |
+|---|---:|
+| 70%+ | 0.25 |
+| 60% to 70% | 0.0625 |
+| 50% to 60% | 0.03125 |
 
-## Important statistical note
+A token enters paper trading when the distinct-wallet weight reaches **1.0**
+inside a 30-minute window. This is a heuristic score, not a probability claim:
+wallets may be correlated or follow the same source.
 
-Three wallets with a 70% historical win rate do **not** automatically imply a
-97.3% success probability. Their decisions can be correlated, they may copy the
-same source, and historical win rate is not calibrated probability. Sentinel
-uses the three-wallet cluster as a strong ranking signal, not a probability
-claim. Paper results must prove the edge before live trading is considered.
+An open token cannot be entered again. After exit it has a **10-minute cooldown**
+(default, configurable with `TOKEN_COOLDOWN_SECONDS`). Exit rules are deliberately
+conservative: trailing activates at **+25%**, trails 15% below the peak, and an
+emergency stop closes 100% at **-45%**.
 
-## Setup
+## Paper account
 
-```bash
-npm install -g gmgn-cli
-gmgn-cli config
-python gmgn/monitor.py --self-test
-cargo test
-```
-
-The read-only monitor needs a GMGN API key. It does **not** need
-`GMGN_PRIVATE_KEY`, does not use GMGN swap endpoints, and cannot submit a trade.
-GMGN OpenAPI is currently open to users; its documented limiter is a leaky
-bucket, so the monitor polls every 15 seconds and caches wallet stats for 15
-minutes.
+Starting balance is **0.1 SOL** and every entry reserves **0.025 SOL**. If the
+balance is below 0.025 SOL, the runtime stops and prints the required zeroed-out
+message. Every entry/exit is stored in SQLite with UTC time to seconds, token,
+price, strength, wallet count, PnL and exit reason.
 
 ## Run
 
-Open two terminals from the repository root:
+```bash
+pip install -r paper/requirements.txt
+npm install -g gmgn-cli
+gmgn-cli config --check
+python -m paper.runtime
+```
+
+Set `TELEGRAM_BOT_TOKEN` and optionally `TELEGRAM_CHAT_ID`, then run the bot in a
+second process:
 
 ```bash
-# Terminal 1: produce qualified cluster signals
-python gmgn/monitor.py
-
-# Terminal 2: consume signals and paper-trade
-cargo run --release
+python -m paper.telegram_bot
 ```
 
-Defaults are configurable with environment variables:
+Bot commands: `/status`, `/trades`, `/wallets`, `/help`. The bot is read-only
+with respect to trading: it only reports SQLite state and never calls GMGN swap.
+`gmgn-cli` must be configured with an API key; no private key is needed.
 
-```text
-GMGN_MIN_CLUSTER_WALLETS=3
-GMGN_MIN_WINRATE=0.70
-GMGN_MIN_BUYS_30D=10
-GMGN_MIN_REALIZED_PROFIT_USD=0
-GMGN_CLUSTER_WINDOW_SECONDS=1800
-GMGN_POLL_SECONDS=15
-GMGN_STATS_TTL_SECONDS=900
-GMGN_FEED_LIMIT=200
-SENTINEL_DB=sentinel.db
-```
+## Seeds
+
+The supplied Solana list is stored in `data/seed_solana_wallets.txt`. The
+attached CSV contains EVM-style `0x` addresses and must be treated as the
+separate Robinhood seed source, not mixed into Solana. Import it only after
+confirming GMGN's Robinhood feed exposes the same stats fields. `track smartmoney`
+is documented for Solana/BSC/Base/Ethereum, not Robinhood, so the current paper
+collector is Solana-only and fails closed instead of pretending Robinhood data
+is available.
 
 ## Safety
 
-`config.toml` still defaults to `dry_run=true` and `live=false`. A real
-transaction requires both gates to be deliberately reversed. Keep them as-is
-until the new GMGN pipeline has accumulated enough non-zero paper trades to
-measure win rate after lag, fees, and slippage.
-
-## What is intentionally not solved yet
-
-GMGN reports token price in USD while the Rust paper-fill model expects SOL per
-token. The monitor does not mislabel USD as SOL. It sends a zero reference price
-and lets the executor resolve the pool and calculate an on-chain fill; unresolved
-pools remain unsuitable for PnL analysis and should be treated as telemetry,
-not evidence of profitability.
+No real trade path is used by this runtime. The existing Rust configuration
+still defaults to `dry_run=true` and `live=false`; do not fund or enable live
+execution while paper results are being collected.
