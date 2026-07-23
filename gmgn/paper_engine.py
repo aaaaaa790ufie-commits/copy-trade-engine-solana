@@ -93,9 +93,20 @@ def cycle(c):
   try: trades=list_rows(cli(["track","smartmoney","--chain",chain,"--limit",str(LIMIT)]))
   except Exception as e: LOG.warning("feed %s: %s",chain,e); continue
   makers=sorted({wallet(t) for t in trades if wallet(t)}); stats=get_stats(chain,makers); weights={w:weight(wr(s)) for w,s in stats.items() if wr(s)>=.50 and n(s,"buy_count","buy_count_7d","trades_7d")>0}
-  for w,z in weights.items(): c.execute("INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(address,chain) DO UPDATE SET last_seen=excluded.last_seen,winrate=excluded.winrate,updated_at=excluded.updated_at",(w,chain,"gmgn",now,wr(stats[w]),now))
+  before=c.execute("SELECT COUNT(*) FROM wallet_watch WHERE chain=? AND active=1",(chain,)).fetchone()[0]; new_w=0; high_wr=[]
+  for w,z in weights.items():
+   exist=c.execute("SELECT 1 FROM wallet_watch WHERE address=? AND chain=?",(w,chain)).fetchone()
+   if not exist: new_w+=1
+   wrv=wr(stats[w])
+   if wrv>=.70: high_wr.append((w[:8],wrv))
+   c.execute("INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(address,chain) DO UPDATE SET last_seen=excluded.last_seen,winrate=excluded.winrate,updated_at=excluded.updated_at",(w,chain,"gmgn",now,wrv,now))
+  after=c.execute("SELECT COUNT(*) FROM wallet_watch WHERE chain=? AND active=1",(chain,)).fetchone()[0]
+  if new_w>0 or high_wr:
+   s=f"70%+: {len(high_wr)}"+(f" ex: {high_wr[0][0]}... {high_wr[0][1]*100:.0f}%" if high_wr else "")
+   emit(c,"WALLET",f"{chain} | +{new_w} новых, всего {after} | {s}")
   enter(c,chain,trades,weights,now); exits(c,chain,trades,now)
  c.commit()
+ LOG.info("[cycle] feed=%d makers=%d qualified=%d wallets=%d events_1m=%d",len(trades),len(makers),len(weights),c.execute("SELECT COUNT(*) FROM wallet_watch").fetchone()[0],c.execute("SELECT COUNT(*) FROM engine_events WHERE event_ts>=?",(int(time.time())-60,)).fetchone()[0])
 def main():
  import argparse
  ap=argparse.ArgumentParser(); ap.add_argument("--once",action="store_true"); ap.add_argument("--db-path",default=DB); a=ap.parse_args(); logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s"); c=sqlite3.connect(a.db_path,timeout=30); init(c)
