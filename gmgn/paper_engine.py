@@ -79,8 +79,11 @@ def refresh_wallet_stats(c,chain,now):
  if not stale: return 0
  addrs=[r[0] for r in stale]; st=get_stats(chain,addrs); upd=0; new_high=[]
  for w,data in st.items():
-  wrv=wr(data); buys=n(data,"buy","buy_count","sell","sell_count","trades_7d")
-  if wrv>0 and buys>0:
+  wrv=wr(data); bc=int(n(data,"buy","buy_count","trades_7d")); sc=int(n(data,"sell","sell_count")); total_buys=max(bc,sc)
+  # newbie filter: 100% winrate with only 1 trade total — mark as low to be cleaned
+  if wrv>=1.0 and bc+sc<=1:
+   c.execute("UPDATE wallet_watch SET winrate=?,updated_at=? WHERE address=? AND chain=?",(0.49,now,w,chain)); upd+=1; continue
+  if wrv>0 and total_buys>0:
    old=c.execute("SELECT winrate FROM wallet_watch WHERE address=? AND chain=?",(w,chain)).fetchone()
    ls=int(n(data,"last_timestamp"))
    if ls>0: c.execute("UPDATE wallet_watch SET winrate=?,last_seen=?,updated_at=? WHERE address=? AND chain=?",(wrv,ls,now,w,chain))
@@ -186,6 +189,13 @@ def cycle(c):
    s=f"70%+: {len(high_wr)}"+(f" ex: {high_wr[0][0]}... {high_wr[0][1]*100:.0f}%" if high_wr else "")
    emit(c,"WALLET",f"{chain} | +{new_w} новых, всего {after} | {s}")
   enter(c,chain,trades,weights,now); exits(c,chain,trades,now)
+  # 90%+ call-outs: эмитим сигнал когда профитный кошелёк входит в монету
+  for t in trades:
+   w=wallet(t); m=mint(t)
+   if w and m and w in stats and quote(t)=="buy":
+    wrs=wr(stats[w])
+    if wrs>=.90:
+     emit(c,"WALLET_BUY",f"кошелёк {w[:12]}... зашёл в монету {m} (wr={wrs*100:.0f}%)")
   refresh_wallet_stats(c,chain,now)
   discover_wallets(c,chain,now)
   cleanup_wallets(c,chain,now)
