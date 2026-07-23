@@ -61,7 +61,7 @@ def get_stats(chain,wallets):
  return out
 STATS_REFRESH_SEC=int(os.getenv("GMGN_STATS_TTL_SECONDS","3600"))
 def refresh_wallet_stats(c,chain,now):
- stale=c.execute("SELECT address FROM wallet_watch WHERE chain=? AND (winrate=0 OR ?-updated_at>=?) AND source!='manual_seed' LIMIT 200",(chain,now,STATS_REFRESH_SEC)).fetchall()
+ stale=c.execute("SELECT address FROM wallet_watch WHERE chain=? AND (winrate=0 OR ?-updated_at>=?) LIMIT 200",(chain,now,STATS_REFRESH_SEC)).fetchall()
  if not stale: return 0
  addrs=[r[0] for r in stale]
  st=get_stats(chain,addrs)
@@ -69,7 +69,7 @@ def refresh_wallet_stats(c,chain,now):
  for w,data in st.items():
   wrv=wr(data)
   if wrv>0:
-   c.execute("UPDATE wallet_watch SET winrate=?,last_seen=?,updated_at=? WHERE address=? AND chain=?",(wrv,int(num(data,"last_timestamp",default=0)),now,w,chain))
+   c.execute("UPDATE wallet_watch SET winrate=?,last_seen=?,updated_at=? WHERE address=? AND chain=?",(wrv,int(n(data,"last_timestamp")),now,w,chain))
    upd+=1
  if upd: LOG.info("refreshed stats for %d/%d stale wallets on %s",upd,len(addrs),chain)
  return upd
