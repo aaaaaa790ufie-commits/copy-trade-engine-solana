@@ -4,8 +4,14 @@ import json, logging, os, sqlite3, subprocess, time
 from collections import defaultdict
 LOG=logging.getLogger("paper-engine")
 DB=os.getenv("SENTINEL_DB","sentinel.db"); BUDGET=float(os.getenv("PAPER_BUDGET_SOL","0.1")); STAKE=float(os.getenv("PAPER_TRADE_SIZE_SOL","0.025")); WINDOW=int(os.getenv("GMGN_CLUSTER_WINDOW_SECONDS","1800")); COOLDOWN=int(os.getenv("GMGN_COOLDOWN_SECONDS","420")); POLL=int(os.getenv("GMGN_POLL_SECONDS","15")); ENTRY=float(os.getenv("GMGN_ENTRY_SCORE","1.0")); TRAIL_ACT=float(os.getenv("TRAILING_ACTIVATE_PCT","25"))/100; TRAIL_DIST=float(os.getenv("TRAILING_DISTANCE_PCT","15"))/100; HARD=float(os.getenv("HARD_STOP_PCT","45"))/100; LIMIT=int(os.getenv("GMGN_FEED_LIMIT","200")); CHAINS=[x.strip() for x in os.getenv("GMGN_CHAINS","sol,robinhood").split(",") if x.strip()]
+def _find_gmgn():
+    for d in os.environ.get('PATH','').split(';'):
+        cand=os.path.join(d,'gmgn-cli.cmd')
+        if os.path.isfile(cand): return cand
+    return 'gmgn-cli.cmd'
+_GMGN=_find_gmgn()
 def cli(args):
- p=subprocess.run(["gmgn-cli",*args,"--raw"],capture_output=True,text=True,timeout=45)
+ p=subprocess.run([_GMGN,*args,"--raw"],capture_output=True,text=True,timeout=45)
  if p.returncode: raise RuntimeError((p.stderr or p.stdout).strip())
  lines=[x.strip() for x in p.stdout.splitlines() if x.strip()]; return json.loads(lines[-1]) if lines else {}
 def list_rows(x):
