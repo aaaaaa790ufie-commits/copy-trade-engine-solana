@@ -9,8 +9,14 @@ BUDGET=float(os.getenv('PAPER_BUDGET_SOL','0.1')); STAKE=float(os.getenv('PAPER_
 ENTRY_SCORE=float(os.getenv('GMGN_ENTRY_SCORE','1.0')); WINDOW=int(os.getenv('GMGN_CLUSTER_WINDOW_SECONDS','1800')); COOLDOWN=int(os.getenv('GMGN_COOLDOWN_SECONDS','420')); POLL=int(os.getenv('GMGN_POLL_SECONDS','15'))
 TRAIL_ACTIVATE=float(os.getenv('TRAILING_ACTIVATE_PCT','25'))/100; TRAIL_DISTANCE=float(os.getenv('TRAILING_DISTANCE_PCT','15'))/100; HARD_STOP=float(os.getenv('HARD_STOP_PCT','45'))/100; FEED_LIMIT=int(os.getenv('GMGN_FEED_LIMIT','200'))
 CHAINS=[x.strip() for x in os.getenv('GMGN_CHAINS','sol,robinhood').split(',') if x.strip()]
+def _find_gmgn():
+    for d in os.environ.get('PATH','').split(';'):
+        cand=os.path.join(d,'gmgn-cli.cmd')
+        if os.path.isfile(cand): return cand
+    return 'gmgn-cli.cmd'
+_GMGN=_find_gmgn()
 def cli(args):
- p=subprocess.run(['gmgn-cli',*args,'--raw'],capture_output=True,text=True,timeout=45)
+ p=subprocess.run([_GMGN,*args,'--raw'],capture_output=True,text=True,timeout=45)
  if p.returncode: raise RuntimeError((p.stderr or p.stdout).strip())
  z=[x.strip() for x in p.stdout.splitlines() if x.strip()]; return json.loads(z[-1]) if z else {}
 def unwrap(x):
