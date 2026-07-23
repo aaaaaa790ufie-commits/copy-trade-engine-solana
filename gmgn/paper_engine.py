@@ -45,9 +45,11 @@ CREATE TABLE IF NOT EXISTS paper_positions(token_mint TEXT PRIMARY KEY,chain TEX
 CREATE TABLE IF NOT EXISTS paper_trades(id INTEGER PRIMARY KEY AUTOINCREMENT,token_mint TEXT NOT NULL,chain TEXT NOT NULL,action TEXT NOT NULL,price REAL NOT NULL,stake_sol REAL NOT NULL,pnl_sol REAL NOT NULL DEFAULT 0,pnl_pct REAL NOT NULL DEFAULT 0,reason TEXT NOT NULL,wallet_count INTEGER NOT NULL,signal_score REAL NOT NULL,event_ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS paper_cooldowns(token_mint TEXT NOT NULL,chain TEXT NOT NULL,until_ts INTEGER NOT NULL,PRIMARY KEY(token_mint,chain));
 CREATE TABLE IF NOT EXISTS wallet_watch(address TEXT NOT NULL,chain TEXT NOT NULL,source TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,last_seen INTEGER NOT NULL DEFAULT 0,winrate REAL NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL,PRIMARY KEY(address,chain));
+CREATE TABLE IF NOT EXISTS wallet_blacklist(address TEXT NOT NULL,chain TEXT NOT NULL,blacklisted_at INTEGER NOT NULL,reason TEXT,PRIMARY KEY(address,chain));
 CREATE TABLE IF NOT EXISTS engine_events(id INTEGER PRIMARY KEY AUTOINCREMENT,event_ts INTEGER NOT NULL,kind TEXT NOT NULL,message TEXT NOT NULL);
 """); c.commit()
 def emit(c,kind,msg): LOG.info("%s: %s",kind,msg); c.execute("INSERT INTO engine_events VALUES(NULL,?,?,?)",(int(time.time()),kind,msg))
+def is_blacklisted(c,addr,chain): return bool(c.execute("SELECT 1 FROM wallet_blacklist WHERE address=? AND chain=?",(addr,chain)).fetchone())
 def get_stats(chain,wallets):
  out={}
  for i in range(0,len(wallets),10):
@@ -101,7 +103,8 @@ def discover_wallets(c,chain,now):
     except Exception as ex: LOG.warning("traders %s: %s",ta[:8],ex)
   except Exception as e: LOG.warning("trending %s: %s",chain,e)
  if addrs:
-  for w in addrs: c.execute("INSERT OR IGNORE INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) VALUES(?,?,?,?,?,?)",(w,chain,"gmgn",now,0,now))
+  for w in addrs:
+   if not is_blacklisted(c,w,chain): c.execute("INSERT OR IGNORE INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) VALUES(?,?,?,?,?,?)",(w,chain,"gmgn",now,0,now))
   LOG.info("discovered +%d wallets from KOL/traders on %s",len(addrs),chain)
 def cooling(c,m,chain,now):
  r=c.execute("SELECT until_ts FROM paper_cooldowns WHERE token_mint=? AND chain=?",(m,chain)).fetchone(); return bool(r and r[0]>now)
@@ -143,9 +146,9 @@ def cycle(c):
    if not exist: new_w+=1
    wrv=wr(stats[w])
    if wrv>=.70: high_wr.append((w[:8],wrv))
-   if wrv>0:
+   if wrv>0 and not is_blacklisted(c,w,chain):
     c.execute("INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(address,chain) DO UPDATE SET last_seen=excluded.last_seen,winrate=excluded.winrate,updated_at=excluded.updated_at",(w,chain,"gmgn",now,wrv,now))
-   else:
+   elif not is_blacklisted(c,w,chain):
     c.execute("INSERT INTO wallet_watch(address,chain,source,last_seen,winrate) VALUES(?,?,?,?,?) ON CONFLICT(address,chain) DO UPDATE SET last_seen=excluded.last_seen,winrate=excluded.winrate",(w,chain,"gmgn",now,wrv))
   after=c.execute("SELECT COUNT(*) FROM wallet_watch WHERE chain=? AND active=1",(chain,)).fetchone()[0]
   if new_w>0:
@@ -154,7 +157,11 @@ def cycle(c):
   enter(c,chain,trades,weights,now); exits(c,chain,trades,now)
   refresh_wallet_stats(c,chain,now)
   discover_wallets(c,chain,now)
-  c.execute("DELETE FROM wallet_watch WHERE chain=? AND ((winrate>0 AND winrate<0.50) OR (winrate=0 AND ?-updated_at>=60))",(chain,now))
+  # blacklist + remove low-quality wallets
+  low=c.execute("SELECT address FROM wallet_watch WHERE chain=? AND ((winrate>0 AND winrate<0.50) OR (winrate=0 AND ?-updated_at>=60))",(chain,now)).fetchall()
+  if low:
+   c.executemany("INSERT OR IGNORE INTO wallet_blacklist(address,chain,blacklisted_at,reason) VALUES(?,?,?,'low_winrate')",[(r[0],chain,now) for r in low])
+   c.execute("DELETE FROM wallet_watch WHERE chain=? AND ((winrate>0 AND winrate<0.50) OR (winrate=0 AND ?-updated_at>=60))",(chain,now))
  c.commit()
  LOG.info("[cycle] wallets=%d events_total=%d",c.execute("SELECT COUNT(*) FROM wallet_watch").fetchone()[0],c.execute("SELECT COUNT(*) FROM engine_events").fetchone()[0])
 def main():
