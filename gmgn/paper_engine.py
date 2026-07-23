@@ -120,7 +120,7 @@ def cycle(c):
    if wrv>=.70: high_wr.append((w[:8],wrv))
    c.execute("INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(address,chain) DO UPDATE SET last_seen=excluded.last_seen,winrate=excluded.winrate,updated_at=excluded.updated_at",(w,chain,"gmgn",now,wrv,now))
   after=c.execute("SELECT COUNT(*) FROM wallet_watch WHERE chain=? AND active=1",(chain,)).fetchone()[0]
-  if new_w>0 or high_wr:
+  if new_w>0:
    s=f"70%+: {len(high_wr)}"+(f" ex: {high_wr[0][0]}... {high_wr[0][1]*100:.0f}%" if high_wr else "")
    emit(c,"WALLET",f"{chain} | +{new_w} новых, всего {after} | {s}")
   enter(c,chain,trades,weights,now); exits(c,chain,trades,now)
