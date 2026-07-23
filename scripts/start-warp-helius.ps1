@@ -19,8 +19,8 @@ WARP Helius Tunnel — Управление
 ИЛИ через командную строку (требует доработки --import):
   Import-Config
 
-ПРОВЕРКА:
-  curl -s -X POST "https://mainnet.helius-rpc.com/?api-key=33a9f314-..." ^
+ПРОВЕРКА (ключ берётся из переменной окружения HELIUS_API_KEY):
+  curl -s -X POST "https://mainnet.helius-rpc.com/?api-key=$env:HELIUS_API_KEY" ^
     -H "Content-Type: application/json" ^
     -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}'
 

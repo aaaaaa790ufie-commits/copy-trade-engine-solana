@@ -318,7 +318,11 @@ pub fn spawn(cfg: Config, mut exec_rx: Receiver<ExecCommand>) -> tokio::task::Jo
         };
         let rpc_client = RpcClient::new(&rpc_url);
         let http_client = reqwest::Client::new();
-        tracing::info!("[executor] RPC client -> {}", &rpc_url[..40]);
+        // Log host only: never the query string (api-key), and never slice a
+        // fixed byte range — the public fallback URL is shorter than 40 bytes
+        // and a fixed slice would panic.
+        let display_url = rpc_url.split('?').next().unwrap_or(&rpc_url);
+        tracing::info!("[executor] RPC client -> {}", display_url);
 
         while let Some(cmd) = exec_rx.recv().await {
             tracing::info!(

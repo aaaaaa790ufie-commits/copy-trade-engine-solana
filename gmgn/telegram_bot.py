@@ -12,7 +12,7 @@ def push_events(c):
     rows=c.execute("SELECT id,kind,message FROM engine_events WHERE id>? ORDER BY id",(_last_event,)).fetchall()
     for eid,kind,msg in rows:
         _last_event=eid
-        if kind in ("ENTRY","EXIT","WALLET","BANKRUPT"):
+        if kind in ("ENTRY","EXIT","WALLET","BANKRUPT","RECOVERY"):
             try:
                 api("sendMessage",{"chat_id":CHAT,"text":f"{kind}: {msg}"})
                 time.sleep(.3)
@@ -32,14 +32,17 @@ def text(c,command):
         return "\n".join(f"{r[0]}: {r[1]} кошельков, средний winrate {r[2]*100:.1f}%" for r in rs) or "Кошельки ещё не загружены"
     return "/status\n/trades\n/wallets"
 def main():
+    global _last_event
     if not TOKEN: raise SystemExit("TELEGRAM_BOT_TOKEN is required")
-    c=sqlite3.connect(DB,check_same_thread=False); offset=0; _last_event=c.execute("SELECT COALESCE(MAX(id),0) FROM engine_events").fetchone()[0]
+    if not CHAT: raise SystemExit("TELEGRAM_CHAT_ID is required — the bot must answer only its owner chat")
+    c=sqlite3.connect(DB,check_same_thread=False); offset=0
+    _last_event=c.execute("SELECT COALESCE(MAX(id),0) FROM engine_events").fetchone()[0]
     while True:
         try:
             for u in api("getUpdates",{"timeout":25,"offset":offset}).get("result",[]):
-                offset=u["update_id"]+1; msg=u.get("message",{}); chat=str(msg.get("chat",{}).get("id","")); cmd=(msg.get("text") or "").split()[0]
-                if CHAT and chat!=CHAT: continue
-                api("sendMessage",{"chat_id":chat,"text":text(c,cmd)})
+                offset=u["update_id"]+1; msg=u.get("message",{}); chat=str(msg.get("chat",{}).get("id","")); parts=(msg.get("text") or "").split()
+                if not parts or chat!=CHAT: continue
+                api("sendMessage",{"chat_id":chat,"text":text(c,parts[0])})
         except Exception as e:
             if "409" in str(e):
                 api("getUpdates",{"offset":-1}); offset=-1
