@@ -33,7 +33,7 @@ def text(c,command):
     return "/status\n/trades\n/wallets"
 def main():
     if not TOKEN: raise SystemExit("TELEGRAM_BOT_TOKEN is required")
-    c=sqlite3.connect(DB,check_same_thread=False); offset=0
+    c=sqlite3.connect(DB,check_same_thread=False); offset=0; _last_event=c.execute("SELECT COALESCE(MAX(id),0) FROM engine_events").fetchone()[0]
     while True:
         try:
             for u in api("getUpdates",{"timeout":25,"offset":offset}).get("result",[]):
