@@ -126,7 +126,7 @@ def cycle(c):
   enter(c,chain,trades,weights,now); exits(c,chain,trades,now)
   refresh_wallet_stats(c,chain,now)
   # remove wallets that failed qualification (winrate<50% with data)
-  c.execute("DELETE FROM wallet_watch WHERE chain=? AND winrate>0 AND winrate<0.50 AND source!='manual_seed'",(chain,))
+  c.execute("DELETE FROM wallet_watch WHERE chain=? AND ((winrate>0 AND winrate<0.50) OR (winrate=0 AND ?-updated_at>=3600))",(chain,now))
  c.commit()
  LOG.info("[cycle] wallets=%d events_total=%d",c.execute("SELECT COUNT(*) FROM wallet_watch").fetchone()[0],c.execute("SELECT COUNT(*) FROM engine_events").fetchone()[0])
 def main():
