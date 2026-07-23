@@ -40,6 +40,11 @@ def main():
                 offset=u["update_id"]+1; msg=u.get("message",{}); chat=str(msg.get("chat",{}).get("id","")); cmd=(msg.get("text") or "").split()[0]
                 if CHAT and chat!=CHAT: continue
                 api("sendMessage",{"chat_id":chat,"text":text(c,cmd)})
-        except Exception as e: print("telegram:",e); time.sleep(5)
+        except Exception as e:
+            if "409" in str(e):
+                api("getUpdates",{"offset":-1}); offset=-1
+            else:
+                print("telegram:",e)
+            time.sleep(5)
         push_events(c)
 if __name__=="__main__": main()

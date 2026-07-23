@@ -63,16 +63,17 @@ STATS_REFRESH_SEC=int(os.getenv("GMGN_STATS_TTL_SECONDS","3600"))
 def refresh_wallet_stats(c,chain,now):
  stale=c.execute("SELECT address FROM wallet_watch WHERE chain=? AND (winrate=0 OR ?-updated_at>=?) LIMIT 200",(chain,now,STATS_REFRESH_SEC)).fetchall()
  if not stale: return 0
- addrs=[r[0] for r in stale]; st=get_stats(chain,addrs); upd=0; high_wr=[]
+ addrs=[r[0] for r in stale]; st=get_stats(chain,addrs); upd=0; new_high=[]
  for w,data in st.items():
-  wrv=wr(data)
-  if wrv>0:
+  wrv=wr(data); buys=n(data,"buy","buy_count","sell","sell_count","trades_7d")
+  if wrv>0 and buys>0:
+   old=c.execute("SELECT winrate FROM wallet_watch WHERE address=? AND chain=?",(w,chain)).fetchone()
    c.execute("UPDATE wallet_watch SET winrate=?,last_seen=?,updated_at=? WHERE address=? AND chain=?",(wrv,int(n(data,"last_timestamp")),now,w,chain))
    upd+=1
-   if wrv>=.70: high_wr.append((w[:8],wrv))
+   if wrv>=.70 and old and old[0]<.70: new_high.append((w[:8],wrv))
  if upd:
   LOG.info("refreshed stats for %d/%d stale wallets on %s",upd,len(addrs),chain)
-  if high_wr: emit(c,"WALLET",f"{chain} | refresh: {len(high_wr)} с winrate >=70%, ex: {high_wr[0][0]}... {high_wr[0][1]*100:.0f}%")
+  if new_high: emit(c,"WALLET",f"{chain} | NEW high-winrate: {len(new_high)} wallet(s) >=70%, ex: {new_high[0][0]}... {new_high[0][1]*100:.0f}%")
  return upd
 def cooling(c,m,chain,now):
  r=c.execute("SELECT until_ts FROM paper_cooldowns WHERE token_mint=? AND chain=?",(m,chain)).fetchone(); return bool(r and r[0]>now)
