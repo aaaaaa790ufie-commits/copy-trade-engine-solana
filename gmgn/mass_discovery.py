@@ -8,7 +8,7 @@ rewriting wallets-quality.txt. It never submits swaps and never needs a
 GMGN private key.
 """
 from __future__ import annotations
-import argparse, json, logging, os, subprocess, tempfile, time
+import argparse, json, logging, os, shutil, subprocess, tempfile, time
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,8 +19,15 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUT = ROOT / "wallets-quality.txt"
 DEFAULT_SEEDS = ROOT / "data" / "seed_wallets_sol.txt"
 
+def _find_gmgn():
+    for name in ("gmgn-cli","gmgn-cli.cmd"):
+        found=shutil.which(name)
+        if found: return found
+    return "gmgn-cli.cmd" if os.name=="nt" else "gmgn-cli"
+_GMGN=_find_gmgn()
+
 def cli(args: list[str]) -> Any:
-    proc = subprocess.run(["gmgn-cli", *args, "--raw"], capture_output=True, text=True, timeout=60)
+    proc = subprocess.run([_GMGN, *args, "--raw"], capture_output=True, text=True, timeout=60)
     if proc.returncode:
         raise RuntimeError((proc.stderr or proc.stdout).strip())
     lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
@@ -36,7 +43,7 @@ def rows(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, list):
         return [x for x in value if isinstance(x, dict)]
     if isinstance(value, dict):
-        for key in ("list", "items", "tokens", "wallets", "result"):
+        for key in ("list", "items", "tokens", "wallets", "result", "rank"):
             if isinstance(value.get(key), list):
                 return [x for x in value[key] if isinstance(x, dict)]
         return [value] if value else []
@@ -76,39 +83,43 @@ def discover_candidates(args: argparse.Namespace) -> dict[str, set[str]]:
                 candidates[wallet].add(source)
 
     add("smartmoney", cli(["track", "smartmoney", "--chain", "sol", "--limit", str(args.feed_limit)]))
+    time.sleep(args.delay)
     add("kol", cli(["track", "kol", "--chain", "sol", "--limit", str(args.feed_limit)]))
+    time.sleep(args.delay)
 
     token_ids: set[str] = set()
     for interval in ("5m", "1h", "6h", "24h"):
-        for order_by in ("smart-degen-count", "renowned-count", "volume"):
-            payload = cli([
-                "market", "trending", "--chain", "sol", "--interval", interval,
-                "--limit", str(args.token_limit), "--order-by", order_by,
-                "--direction", "desc", "--filter", "not_risk",
-            ])
-            for item in rows(payload):
+        for order_by in ("smart_degen_count", "renowned_count", "volume"):
+            try:
+                payload = cli(["market", "trending", "--chain", "sol", "--interval", interval,
+                               "--limit", str(args.token_limit), "--order-by", order_by,
+                               "--direction", "desc", "--filter", "not_risk"])
+                for item in rows(payload):
+                    token = token_address(item)
+                    if token:
+                        token_ids.add(token)
+            except Exception as exc:
+                LOG.warning("trending %s %s: %s", interval, order_by, exc)
+            time.sleep(args.delay)
+
+    for trench_type in ("new_creation", "near_completion", "completed"):
+        try:
+            payload = cli(["market", "trenches", "--chain", "sol", "--type", trench_type])
+            for item in rows(payload.get(trench_type, [])):
                 token = token_address(item)
                 if token:
                     token_ids.add(token)
-
-    for trench_type in ("new_creation", "near_completion", "completed"):
-        payload = cli([
-            "market", "trenches", "--chain", "sol", "--type", trench_type,
-            "--limit", str(args.token_limit),
-        ])
-        for item in rows(payload):
-            token = token_address(item)
-            if token:
-                token_ids.add(token)
+        except Exception as exc:
+            LOG.warning("trenches %s: %s", trench_type, exc)
+        time.sleep(args.delay)
 
     token_ids = set(list(token_ids)[: args.max_tokens])
     LOG.info("candidate feeds: %d wallets, %d tokens", len(candidates), len(token_ids))
     for index, token in enumerate(sorted(token_ids), 1):
         try:
-            add(f"token_traders:{token}", cli([
-                "token", "traders", "--chain", "sol", "--address", token,
-                "--limit", str(args.trader_limit),
-            ]))
+            add(f"token_traders:{token[:8]}", cli(["token", "traders", "--chain", "sol",
+                                                   "--address", token,
+                                                   "--limit", str(args.trader_limit)]))
         except Exception as exc:
             LOG.warning("token traders failed %s (%d/%d): %s", token, index, len(token_ids), exc)
         time.sleep(args.delay)
@@ -151,7 +162,8 @@ def qualifies(stat: dict[str, Any], args: argparse.Namespace) -> tuple[bool, flo
 
 def write_quality(path: Path, qualified: list[tuple[str, float, int, str]], min_wr: float, dry_run: bool) -> None:
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    lines = [f"# Solana quality wallets | winrate>={min_wr:.2f} | {len(qualified)} wallets | {stamp}", "# address | source | winrate | last_seen_ts"]
+    lines = [f"# Solana quality wallets | winrate>={min_wr:.2f} | {len(qualified)} wallets | {stamp}",
+             "# address | source | winrate | last_seen_ts"]
     lines.extend(f"{wallet} | {source} | {wr:.4f} | {seen}" for wallet, wr, seen, source in qualified)
     content = "\n".join(lines) + "\n"
     if dry_run:
