@@ -33,6 +33,17 @@ def cli(args: list[str]) -> Any:
     lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
     return json.loads(lines[-1]) if lines else {}
 
+def _cli_retry(args: list[str], retries: int = 3, delay: float = 1.0) -> Any:
+    last_err = None
+    for attempt in range(retries):
+        try:
+            return cli(args)
+        except RuntimeError as e:
+            last_err = e
+            LOG.warning("cli attempt %d/%d failed: %s", attempt + 1, retries, e)
+            time.sleep(delay * (attempt + 1))
+    raise last_err  # type: ignore[arg-type]
+
 def unwrap(value: Any) -> Any:
     while isinstance(value, dict) and isinstance(value.get("data"), (dict, list)):
         value = value["data"]
@@ -82,18 +93,18 @@ def discover_candidates(args: argparse.Namespace) -> dict[str, set[str]]:
             if wallet:
                 candidates[wallet].add(source)
 
-    add("smartmoney", cli(["track", "smartmoney", "--chain", "sol", "--limit", str(args.feed_limit)]))
+    add("smartmoney", _cli_retry(["track", "smartmoney", "--chain", "sol", "--limit", str(args.feed_limit)]))
     time.sleep(args.delay)
-    add("kol", cli(["track", "kol", "--chain", "sol", "--limit", str(args.feed_limit)]))
+    add("kol", _cli_retry(["track", "kol", "--chain", "sol", "--limit", str(args.feed_limit)]))
     time.sleep(args.delay)
 
     token_ids: set[str] = set()
     for interval in ("5m", "1h", "6h", "24h"):
         for order_by in ("smart_degen_count", "renowned_count", "volume"):
             try:
-                payload = cli(["market", "trending", "--chain", "sol", "--interval", interval,
+                payload = _cli_retry(["market", "trending", "--chain", "sol", "--interval", interval,
                                "--limit", str(args.token_limit), "--order-by", order_by,
-                               "--direction", "desc", "--filter", "not_risk"])
+                               "--direction", "desc"])
                 for item in rows(payload):
                     token = token_address(item)
                     if token:
@@ -104,7 +115,7 @@ def discover_candidates(args: argparse.Namespace) -> dict[str, set[str]]:
 
     for trench_type in ("new_creation", "near_completion", "completed"):
         try:
-            payload = cli(["market", "trenches", "--chain", "sol", "--type", trench_type])
+            payload = _cli_retry(["market", "trenches", "--chain", "sol", "--type", trench_type])
             for item in rows(payload.get(trench_type, [])):
                 token = token_address(item)
                 if token:
@@ -117,7 +128,7 @@ def discover_candidates(args: argparse.Namespace) -> dict[str, set[str]]:
     LOG.info("candidate feeds: %d wallets, %d tokens", len(candidates), len(token_ids))
     for index, token in enumerate(sorted(token_ids), 1):
         try:
-            add(f"token_traders:{token[:8]}", cli(["token", "traders", "--chain", "sol",
+            add(f"token_traders:{token[:8]}", _cli_retry(["token", "traders", "--chain", "sol",
                                                    "--address", token,
                                                    "--limit", str(args.trader_limit)]))
         except Exception as exc:
@@ -141,7 +152,7 @@ def fetch_stats(wallets: list[str], args: argparse.Namespace) -> dict[str, dict[
     for start in range(0, len(wallets), args.stats_batch):
         batch = wallets[start : start + args.stats_batch]
         try:
-            payload = cli(["portfolio", "stats", "--chain", "sol", "--wallet", *batch, "--period", "30d"])
+            payload = _cli_retry(["portfolio", "stats", "--chain", "sol", "--wallet", *batch, "--period", "30d"])
             got = rows(payload)
             for item in got:
                 wallet = wallet_address(item)
