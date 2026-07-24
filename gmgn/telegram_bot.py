@@ -34,7 +34,7 @@ def text(c,command):
         rs=c.execute("SELECT chain,token_mint,score,buy_wallets,total_wallets,updated_at FROM token_scores WHERE score>0 ORDER BY score DESC LIMIT 10").fetchall()
         if not rs:
             return "Нет данных по весам — engine ещё не обновил token_scores"
-        ENTRY=float(os.environ.get("GMGN_ENTRY_SCORE","1.0"))
+        ENTRY=float(os.environ.get("GMGN_ENTRY_SCORE","0.25"))
         return "\n".join(f"#{i+1} {r[0]} {r[1][:10]}... score={r[2]:.4f} need={ENTRY-r[2]:.4f} wallets={r[3]}/{r[4]}" for i,r in enumerate(rs))
     if command=="/help":
         return "/status - бумажный счёт\n/trades - последние 10 сделок\n/wallets - список кошельков\n/weights - веса монет\n/help - это меню"
