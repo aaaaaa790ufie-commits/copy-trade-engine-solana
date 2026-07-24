@@ -28,8 +28,8 @@ def text(c,command):
         rs=c.execute("SELECT chain,token_mint,action,pnl_pct,pnl_sol,reason,event_ts FROM paper_trades ORDER BY id DESC LIMIT 10").fetchall()
         return "\n".join(f"{time.strftime('%Y-%m-%d %H:%M:%S UTC',time.gmtime(r[6]))} {r[2]} {r[0]} {r[1][:8]}... {r[3]*100:+.2f}% {r[4]:+.5f} SOL | {r[5]}" for r in rs) or "Сделок пока нет"
     if command=="/wallets":
-        rs=c.execute("SELECT chain,COUNT(*),AVG(winrate) FROM wallet_watch WHERE active=1 GROUP BY chain").fetchall()
-        return "\n".join(f"{r[0]}: {r[1]} кошельков, средний winrate {r[2]*100:.1f}%" for r in rs) or "Кошельки ещё не загружены"
+        rs=c.execute("SELECT chain,COUNT(*),AVG(CASE WHEN winrate>0 THEN winrate END),SUM(CASE WHEN winrate>0 THEN 1 ELSE 0 END) FROM wallet_watch WHERE active=1 GROUP BY chain").fetchall()
+        return "\\n".join(f"{r[0]}: {r[3]} из {r[1]} кошельков, средний winrate {r[2]*100:.1f}%" for r in rs) or "Кошельки ещё не загружены"
     return "/status\n/trades\n/wallets"
 def main():
     global _last_event
