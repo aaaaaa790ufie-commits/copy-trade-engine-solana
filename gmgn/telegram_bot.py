@@ -29,8 +29,16 @@ def text(c,command):
         return "\n".join(f"{time.strftime('%Y-%m-%d %H:%M:%S UTC',time.gmtime(r[6]))} {r[2]} {r[0]} {r[1][:8]}... {r[3]*100:+.2f}% {r[4]:+.5f} SOL | {r[5]}" for r in rs) or "Сделок пока нет"
     if command=="/wallets":
         rs=c.execute("SELECT chain,COUNT(*),AVG(CASE WHEN winrate>0 THEN winrate END),SUM(CASE WHEN winrate>0 THEN 1 ELSE 0 END) FROM wallet_watch WHERE active=1 GROUP BY chain").fetchall()
-        return "\\n".join(f"{r[0]}: {r[3]} из {r[1]} кошельков, средний winrate {r[2]*100:.1f}%" for r in rs) or "Кошельки ещё не загружены"
-    return "/status\n/trades\n/wallets"
+        return "\n".join(f"{r[0]}: {r[3]} из {r[1]} кошельков, средний winrate {r[2]*100:.1f}%" for r in rs) or "Кошельки ещё не загружены"
+    if command=="/weights":
+        rs=c.execute("SELECT chain,token_mint,score,buy_wallets,total_wallets,updated_at FROM token_scores WHERE score>0 ORDER BY score DESC LIMIT 10").fetchall()
+        if not rs:
+            return "Нет данных по весам — engine ещё не обновил token_scores"
+        ENTRY=float(os.environ.get("GMGN_ENTRY_SCORE","1.0"))
+        return "\n".join(f"#{i+1} {r[0]} {r[1][:10]}... score={r[2]:.4f} need={ENTRY-r[2]:.4f} wallets={r[3]}/{r[4]}" for i,r in enumerate(rs))
+    if command=="/help":
+        return "/status - бумажный счёт\n/trades - последние 10 сделок\n/wallets - список кошельков\n/weights - веса монет\n/help - это меню"
+    return "/status\n/trades\n/wallets\n/weights\n/help"
 def main():
     global _last_event
     if not TOKEN: raise SystemExit("TELEGRAM_BOT_TOKEN is required")
@@ -42,7 +50,7 @@ def main():
             for u in api("getUpdates",{"timeout":25,"offset":offset}).get("result",[]):
                 offset=u["update_id"]+1; msg=u.get("message",{}); chat=str(msg.get("chat",{}).get("id","")); parts=(msg.get("text") or "").split()
                 if not parts or chat!=CHAT: continue
-                api("sendMessage",{"chat_id":chat,"text":text(c,parts[0])})
+                api("sendMessage",{"chat_id":chat,"text":text(c,parts[0]),"reply_markup":json.dumps({"keyboard":[["/status","/trades"],["/wallets","/weights"],["/help"]],"resize_keyboard":True,"one_time_keyboard":False})})
         except Exception as e:
             if "409" in str(e):
                 api("getUpdates",{"offset":-1}); offset=-1

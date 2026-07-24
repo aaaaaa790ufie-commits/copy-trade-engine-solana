@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS paper_trades(id INTEGER PRIMARY KEY AUTOINCREMENT,tok
 CREATE TABLE IF NOT EXISTS paper_cooldowns(token_mint TEXT NOT NULL,chain TEXT NOT NULL,until_ts INTEGER NOT NULL,PRIMARY KEY(token_mint,chain));
 CREATE TABLE IF NOT EXISTS wallet_watch(address TEXT NOT NULL,chain TEXT NOT NULL,source TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,last_seen INTEGER NOT NULL DEFAULT 0,winrate REAL NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL,PRIMARY KEY(address,chain));
 CREATE TABLE IF NOT EXISTS wallet_blacklist(address TEXT NOT NULL,chain TEXT NOT NULL,blacklisted_at INTEGER NOT NULL,reason TEXT,PRIMARY KEY(address,chain));
+CREATE TABLE IF NOT EXISTS token_scores(chain TEXT NOT NULL,token_mint TEXT NOT NULL,score REAL NOT NULL,buy_wallets INTEGER NOT NULL,total_wallets INTEGER NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(chain,token_mint));
 CREATE TABLE IF NOT EXISTS engine_events(id INTEGER PRIMARY KEY AUTOINCREMENT,event_ts INTEGER NOT NULL,kind TEXT NOT NULL,message TEXT NOT NULL);
 """); c.commit()
 def emit(c,kind,msg): LOG.info("%s: %s",kind,msg); c.execute("INSERT INTO engine_events VALUES(NULL,?,?,?)",(int(time.time()),kind,msg))
@@ -90,8 +91,9 @@ def refresh_wallet_stats(c,chain,now):
    else: c.execute("UPDATE wallet_watch SET winrate=?,updated_at=? WHERE address=? AND chain=?",(wrv,now,w,chain))
    upd+=1
    if wrv>=.70 and old and old[0]<.70: new_high.append((w[:8],wrv))
-  elif wrv>0 and buys==0:
-   c.execute("UPDATE wallet_watch SET winrate=?,updated_at=? WHERE address=? AND chain=?",(wrv,now,w,chain))
+  elif wrv>0 and bc==0:
+   # inactive — demote to 0.49 so cleanup catches it
+   c.execute("UPDATE wallet_watch SET winrate=?,updated_at=? WHERE address=? AND chain=?",(min(wrv,0.49),now,w,chain))
  if upd:
   LOG.info("refreshed stats for %d/%d stale wallets on %s",upd,len(addrs),chain)
   if new_high: emit(c,"WALLET",f"{chain} | NEW high-winrate: {len(new_high)} wallet(s) >=70%, ex: {new_high[0][0]}... {new_high[0][1]*100:.0f}%")
@@ -168,6 +170,17 @@ def exits(c,chain,trades,now):
  a=c.execute("SELECT budget_sol,bankrupt FROM paper_account WHERE id=1").fetchone()
  if a and a[1] and a[0]>=STAKE:
   c.execute("UPDATE paper_account SET bankrupt=0,updated_at=? WHERE id=1",(now,)); emit(c,"RECOVERY",f"баланс {a[0]:.5f} SOL снова покрывает ставку {STAKE:.4f} — paper-трейдинг возобновлён")
+def save_token_scores(c,chain,trades,weights,now):
+ c.execute("DELETE FROM token_scores WHERE chain=?",(chain,))
+ score_map=defaultdict(lambda:{"score":0,"buy":0,"total":0})
+ for t in trades:
+  m=mint(t); w=wallet(t); ts=stamp(t)
+  if m and w in weights and ts>=now-WINDOW and allowed(t,chain):
+   if score_map[m]["total"]==0: score_map[m]["mint"]=m
+   score_map[m]["total"]+=1
+   if quote(t)=="buy": score_map[m]["score"]+=weights[w]; score_map[m]["buy"]+=1
+ for m,info in sorted(score_map.items(),key=lambda x:-x[1]["score"]):
+  c.execute("INSERT INTO token_scores(chain,token_mint,score,buy_wallets,total_wallets,updated_at) VALUES(?,?,?,?,?,?)",(chain,m,info["score"],info["buy"],info["total"],now))
 def cycle(c):
  now=int(time.time())
  for chain in CHAINS:
@@ -188,7 +201,7 @@ def cycle(c):
   if new_w>0:
    s=f"70%+: {len(high_wr)}"+(f" ex: {high_wr[0][0]}... {high_wr[0][1]*100:.0f}%" if high_wr else "")
    emit(c,"WALLET",f"{chain} | +{new_w} новых, всего {after} | {s}")
-  enter(c,chain,trades,weights,now); exits(c,chain,trades,now)
+  enter(c,chain,trades,weights,now); exits(c,chain,trades,now); save_token_scores(c,chain,trades,weights,now)
   # 90%+ call-outs: эмитим сигнал когда профитный кошелёк входит в монету
   for t in trades:
    w=wallet(t); m=mint(t)
