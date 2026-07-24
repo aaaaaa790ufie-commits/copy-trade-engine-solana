@@ -126,14 +126,17 @@ def discover_candidates(args: argparse.Namespace) -> dict[str, set[str]]:
 
     token_ids = set(list(token_ids)[: args.max_tokens])
     LOG.info("candidate feeds: %d wallets, %d tokens", len(candidates), len(token_ids))
-    for index, token in enumerate(sorted(token_ids), 1):
-        try:
-            add(f"token_traders:{token[:8]}", _cli_retry(["token", "traders", "--chain", "sol",
-                                                   "--address", token,
-                                                   "--limit", str(args.trader_limit)]))
-        except Exception as exc:
-            LOG.warning("token traders failed %s (%d/%d): %s", token, index, len(token_ids), exc)
-        time.sleep(args.delay)
+    if args.trader_limit > 0:
+        for index, token in enumerate(sorted(token_ids), 1):
+            try:
+                add(f"token_traders:{token[:8]}", _cli_retry(["token", "traders", "--chain", "sol",
+                                                       "--address", token,
+                                                       "--limit", str(args.trader_limit)]))
+            except Exception as exc:
+                LOG.warning("token traders failed %s (%d/%d): %s", token, index, len(token_ids), exc)
+            time.sleep(args.delay)
+    else:
+        LOG.info("skipping token traders (trader_limit=0)")
     LOG.info("raw unique candidates: %d", len(candidates))
     return candidates
 
@@ -167,8 +170,8 @@ def fetch_stats(wallets: list[str], args: argparse.Namespace) -> dict[str, dict[
 
 def qualifies(stat: dict[str, Any], args: argparse.Namespace) -> tuple[bool, float, int, int]:
     wr = number(stat, "winrate", "win_rate", "pnl_stat.winrate", "pnl_stat.win_rate")
-    active_7d = int(number(stat, "buy_count_7d", "txs_7d", "trades_7d", "active_tx_count_7d"))
-    total_30d = int(number(stat, "buy_count_30d", "txs_30d", "trades_30d", "buy_count"))
+    active_7d = int(number(stat, "buy_count_7d", "txs_7d", "trades_7d", "active_tx_count_7d", "buy_7d"))
+    total_30d = int(number(stat, "buy_count_30d", "txs_30d", "trades_30d", "buy_count", "buy_count_30", "buy"))
     return wr >= args.min_winrate and active_7d >= args.min_7d_trades and total_30d >= args.min_30d_trades, wr, active_7d, total_30d
 
 def write_quality(path: Path, qualified: list[tuple[str, float, int, str]], min_wr: float, dry_run: bool) -> None:
@@ -203,8 +206,8 @@ def main() -> int:
     parser.add_argument("--feed-limit", type=int, default=200)
     parser.add_argument("--stats-batch", type=int, default=10)
     parser.add_argument("--min-winrate", type=float, default=0.50)
-    parser.add_argument("--min-7d-trades", type=int, default=1)
-    parser.add_argument("--min-30d-trades", type=int, default=5)
+    parser.add_argument("--min-7d-trades", type=int, default=0)
+    parser.add_argument("--min-30d-trades", type=int, default=3)
     parser.add_argument("--delay", type=float, default=0.35)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
