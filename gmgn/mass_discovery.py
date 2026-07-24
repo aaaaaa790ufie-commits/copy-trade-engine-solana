@@ -1,35 +1,30 @@
 #!/usr/bin/env python3
 """Build a fresh Solana quality-wallet file from GMGN OpenAPI data.
 
-The old collector only looked at the current Smart Money feed, which is a
-small activity window and cannot produce a large, stable universe. This one
-widens the candidate pool with Smart Money, KOL, trending/trench token lists,
-and each token's top traders, then verifies candidates with GMGN 7d + 30d
-portfolio stats before writing wallets-quality.txt atomically.
-
-It never submits swaps and never needs GMGN_PRIVATE_KEY.
+The collector widens the candidate universe with Smart Money, KOL,
+trending/trench token lists, and each token's top traders. It then verifies
+candidates with GMGN 30d stats plus a 7d activity gate before atomically
+rewriting wallets-quality.txt. It never submits swaps and never needs a
+GMGN private key.
 """
 from __future__ import annotations
-import argparse, json, logging, os, shutil, subprocess, tempfile, time
+import argparse, json, logging, os, subprocess, tempfile, time
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 LOG = logging.getLogger("gmgn-mass-discovery")
-SOLANA_REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_OUT = SOLANA_REPO_ROOT / "wallets-quality.txt"
-DEFAULT_SEEDS = SOLANA_REPO_ROOT / "data" / "seed_wallets_sol.txt"
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_OUT = ROOT / "wallets-quality.txt"
+DEFAULT_SEEDS = ROOT / "data" / "seed_wallets_sol.txt"
 
 def cli(args: list[str]) -> Any:
-    command = ["gmgn-cli", *args, "--raw"]
-    proc = subprocess.run(command, capture_output=True, text=True, timeout=60)
+    proc = subprocess.run(["gmgn-cli", *args, "--raw"], capture_output=True, text=True, timeout=60)
     if proc.returncode:
         raise RuntimeError((proc.stderr or proc.stdout).strip())
     lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-    if not lines:
-        return {}
-    return json.loads(lines[-1])
+    return json.loads(lines[-1]) if lines else {}
 
 def unwrap(value: Any) -> Any:
     while isinstance(value, dict) and isinstance(value.get("data"), (dict, list)):
@@ -63,20 +58,20 @@ def number(obj: dict[str, Any], *keys: str, default: float = 0.0) -> float:
             continue
     return default
 
-def address(obj: dict[str, Any]) -> str:
+def wallet_address(obj: dict[str, Any]) -> str:
     return str(obj.get("maker") or obj.get("wallet") or obj.get("wallet_address") or obj.get("address") or "")
 
 def token_address(obj: dict[str, Any]) -> str:
     return str(obj.get("base_address") or obj.get("address") or obj.get("token_address") or "")
 
-def timestamp(obj: dict[str, Any]) -> int:
-    return int(number(obj, "timestamp", "last_active_timestamp", "last_seen", "open_timestamp"))
+def last_seen(obj: dict[str, Any]) -> int:
+    return int(number(obj, "last_active_timestamp", "last_seen", "timestamp", "open_timestamp"))
 
 def discover_candidates(args: argparse.Namespace) -> dict[str, set[str]]:
     candidates: dict[str, set[str]] = defaultdict(set)
     def add(source: str, payload: Any) -> None:
         for item in rows(payload):
-            wallet = address(item)
+            wallet = wallet_address(item)
             if wallet:
                 candidates[wallet].add(source)
 
@@ -107,19 +102,20 @@ def discover_candidates(args: argparse.Namespace) -> dict[str, set[str]]:
                 token_ids.add(token)
 
     token_ids = set(list(token_ids)[: args.max_tokens])
-    LOG.info("candidate source feeds: %d wallets, %d tokens", len(candidates), len(token_ids))
+    LOG.info("candidate feeds: %d wallets, %d tokens", len(candidates), len(token_ids))
     for index, token in enumerate(sorted(token_ids), 1):
         try:
-            payload = cli(["token", "traders", "--chain", "sol", "--address", token, "--limit", str(args.trader_limit)])
-            add(f"token_traders:{token}", payload)
+            add(f"token_traders:{token}", cli([
+                "token", "traders", "--chain", "sol", "--address", token,
+                "--limit", str(args.trader_limit),
+            ]))
         except Exception as exc:
             LOG.warning("token traders failed %s (%d/%d): %s", token, index, len(token_ids), exc)
-        if args.delay:
-            time.sleep(args.delay)
-    LOG.info("raw unique candidate wallets: %d", len(candidates))
+        time.sleep(args.delay)
+    LOG.info("raw unique candidates: %d", len(candidates))
     return candidates
 
-def load_seed_addresses(path: Path) -> dict[str, set[str]]:
+def load_seeds(path: Path) -> dict[str, set[str]]:
     result: dict[str, set[str]] = defaultdict(set)
     if not path.exists():
         return result
@@ -137,28 +133,26 @@ def fetch_stats(wallets: list[str], args: argparse.Namespace) -> dict[str, dict[
             payload = cli(["portfolio", "stats", "--chain", "sol", "--wallet", *batch, "--period", "30d"])
             got = rows(payload)
             for item in got:
-                wallet = address(item)
+                wallet = wallet_address(item)
                 if wallet:
                     stats[wallet] = item
             if len(batch) == 1 and len(got) == 1 and batch[0] not in stats:
                 stats[batch[0]] = got[0]
         except Exception as exc:
             LOG.warning("stats batch %d-%d failed: %s", start + 1, start + len(batch), exc)
-        if args.delay:
-            time.sleep(args.delay)
+        time.sleep(args.delay)
     return stats
 
-def qualifies(stat: dict[str, Any], args: argparse.Namespace) -> tuple[bool, float, int]:
+def qualifies(stat: dict[str, Any], args: argparse.Namespace) -> tuple[bool, float, int, int]:
     wr = number(stat, "winrate", "win_rate", "pnl_stat.winrate", "pnl_stat.win_rate")
-    active_7d = int(number(stat, "buy_count_7d", "buy_count", "txs_7d", "trades_7d", "active_tx_count_7d"))
-    total = int(number(stat, "buy_count_30d", "buy_count", "txs_30d", "trades_30d"))
-    return wr >= args.min_winrate and active_7d >= args.min_7d_trades and total >= args.min_30d_trades, wr, active_7d
+    active_7d = int(number(stat, "buy_count_7d", "txs_7d", "trades_7d", "active_tx_count_7d"))
+    total_30d = int(number(stat, "buy_count_30d", "txs_30d", "trades_30d", "buy_count"))
+    return wr >= args.min_winrate and active_7d >= args.min_7d_trades and total_30d >= args.min_30d_trades, wr, active_7d, total_30d
 
-def write_quality(path: Path, qualified: list[tuple[str, float, int, str]], dry_run: bool) -> None:
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    lines = [f"# Solana quality wallets | winrate>={MIN_WR_TEXT} | {len(qualified)} wallets | {now}", "# address | source | winrate | last_seen_ts"]
-    for wallet, wr, last_seen, source in sorted(qualified, key=lambda x: (-x[1], -x[2], x[0])):
-        lines.append(f"{wallet} | {source} | {wr:.4f} | {last_seen}")
+def write_quality(path: Path, qualified: list[tuple[str, float, int, str]], min_wr: float, dry_run: bool) -> None:
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    lines = [f"# Solana quality wallets | winrate>={min_wr:.2f} | {len(qualified)} wallets | {stamp}", "# address | source | winrate | last_seen_ts"]
+    lines.extend(f"{wallet} | {source} | {wr:.4f} | {seen}" for wallet, wr, seen, source in qualified)
     content = "\n".join(lines) + "\n"
     if dry_run:
         LOG.info("dry-run: would write %d wallets to %s", len(qualified), path)
@@ -176,12 +170,11 @@ def write_quality(path: Path, qualified: list[tuple[str, float, int, str]], dry_
             os.unlink(temp_name)
 
 def main() -> int:
-    global MIN_WR_TEXT
     parser = argparse.ArgumentParser(description="Discover and verify a large current Solana wallet universe via GMGN")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--seed-file", type=Path, default=DEFAULT_SEEDS)
-    parser.add_argument("--target", type=int, default=3000, help="stop after this many verified wallets")
-    parser.add_argument("--max-tokens", type=int, default=300, help="token trader pages to query")
+    parser.add_argument("--target", type=int, default=3000)
+    parser.add_argument("--max-tokens", type=int, default=300)
     parser.add_argument("--token-limit", type=int, default=100)
     parser.add_argument("--trader-limit", type=int, default=100)
     parser.add_argument("--feed-limit", type=int, default=200)
@@ -192,27 +185,26 @@ def main() -> int:
     parser.add_argument("--delay", type=float, default=0.35)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-    MIN_WR_TEXT = f"{args.min_winrate:.2f}"
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     candidates = discover_candidates(args)
-    for wallet, sources in load_seed_addresses(args.seed_file).items():
+    for wallet, sources in load_seeds(args.seed_file).items():
         candidates[wallet].update(sources)
-    ordered = list(candidates)
+    ordered = sorted(candidates, key=lambda w: (-len(candidates[w]), w))
     LOG.info("verifying %d unique wallets with 30d stats", len(ordered))
     stats = fetch_stats(ordered, args)
+
     qualified: list[tuple[str, float, int, str]] = []
-    for wallet, sources in candidates.items():
+    for wallet in ordered:
         stat = stats.get(wallet)
         if not stat:
             continue
-        ok, wr, active_7d = qualifies(stat, args)
+        ok, wr, active_7d, _total_30d = qualifies(stat, args)
         if ok:
-            last_seen = max([timestamp(stat)] + [timestamp({"timestamp": timestamp(item)}) for item in []])
-            qualified.append((wallet, wr, last_seen, ",".join(sorted(sources))[:200]))
-            if len(qualified) >= args.target:
-                break
-    write_quality(args.output, qualified, args.dry_run)
-    LOG.info("verified quality wallets: %d", len(qualified))
+            qualified.append((wallet, wr, last_seen(stat), ",".join(sorted(candidates[wallet]))[:200]))
+    qualified.sort(key=lambda item: (-item[1], -item[2], item[0]))
+    write_quality(args.output, qualified[: args.target], args.min_winrate, args.dry_run)
+    LOG.info("verified quality wallets: %d", min(len(qualified), args.target))
     return 0
 
 if __name__ == "__main__":
