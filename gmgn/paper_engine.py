@@ -3,7 +3,7 @@ from __future__ import annotations
 import json, logging, os, shutil, sqlite3, subprocess, time
 from collections import defaultdict
 LOG=logging.getLogger("paper-engine")
-DB=os.getenv("SENTINEL_DB","sentinel.db"); BUDGET=float(os.getenv("PAPER_BUDGET_SOL","0.1")); STAKE=float(os.getenv("PAPER_TRADE_SIZE_SOL","0.025")); WINDOW=int(os.getenv("GMGN_CLUSTER_WINDOW_SECONDS","1800")); COOLDOWN=int(os.getenv("GMGN_COOLDOWN_SECONDS","420")); POLL=int(os.getenv("GMGN_POLL_SECONDS","15")); ENTRY=float(os.getenv("GMGN_ENTRY_SCORE","1.0")); TRAIL_ACT=float(os.getenv("TRAILING_ACTIVATE_PCT","25"))/100; TRAIL_DIST=float(os.getenv("TRAILING_DISTANCE_PCT","15"))/100; HARD=float(os.getenv("HARD_STOP_PCT","45"))/100; LIMIT=int(os.getenv("GMGN_FEED_LIMIT","200")); CHAINS=[x.strip() for x in os.getenv("GMGN_CHAINS","sol,robinhood").split(",") if x.strip()]
+DB=os.getenv("SENTINEL_DB","sentinel.db"); BUDGET=float(os.getenv("PAPER_BUDGET_SOL","0.1")); STAKE=float(os.getenv("PAPER_TRADE_SIZE_SOL","0.025")); WINDOW=int(os.getenv("GMGN_CLUSTER_WINDOW_SECONDS","1800")); COOLDOWN=int(os.getenv("GMGN_COOLDOWN_SECONDS","420")); POLL=int(os.getenv("GMGN_POLL_SECONDS","15")); ENTRY=float(os.getenv("GMGN_ENTRY_SCORE","0.5")); TRAIL_ACT=float(os.getenv("TRAILING_ACTIVATE_PCT","25"))/100; TRAIL_DIST=float(os.getenv("TRAILING_DISTANCE_PCT","15"))/100; HARD=float(os.getenv("HARD_STOP_PCT","45"))/100; LIMIT=int(os.getenv("GMGN_FEED_LIMIT","200")); CHAINS=[x.strip() for x in os.getenv("GMGN_CHAINS","sol,robinhood").split(",") if x.strip()]
 MAX_HOLD=int(os.getenv("GMGN_MAX_HOLD_SECONDS","21600")); ZERO_TTL=int(os.getenv("GMGN_ZERO_WINRATE_TTL_SECONDS","3600")); PRICE_TTL=int(os.getenv("GMGN_PRICE_TTL_SECONDS","60"))
 def _find_gmgn():
     for name in ("gmgn-cli","gmgn-cli.cmd"):
@@ -171,16 +171,16 @@ def exits(c,chain,trades,now):
  if a and a[1] and a[0]>=STAKE:
   c.execute("UPDATE paper_account SET bankrupt=0,updated_at=? WHERE id=1",(now,)); emit(c,"RECOVERY",f"баланс {a[0]:.5f} SOL снова покрывает ставку {STAKE:.4f} — paper-трейдинг возобновлён")
 def save_token_scores(c,chain,trades,weights,now):
- c.execute("DELETE FROM token_scores WHERE chain=?",(chain,))
- score_map=defaultdict(lambda:{"score":0,"buy":0,"total":0})
+ """Build latest dict same as enter(), then save scores."""
+ latest=defaultdict(dict)
  for t in trades:
-  m=mint(t); w=wallet(t); ts=stamp(t)
-  if m and w in weights and ts>=now-WINDOW and allowed(t,chain):
-   if score_map[m]["total"]==0: score_map[m]["mint"]=m
-   score_map[m]["total"]+=1
-   if quote(t)=="buy": score_map[m]["score"]+=weights[w]; score_map[m]["buy"]+=1
- for m,info in sorted(score_map.items(),key=lambda x:-x[1]["score"]):
-  c.execute("INSERT INTO token_scores(chain,token_mint,score,buy_wallets,total_wallets,updated_at) VALUES(?,?,?,?,?,?)",(chain,m,info["score"],info["buy"],info["total"],now))
+  if allowed(t,chain) and mint(t) and stamp(t)>=now-WINDOW and wallet(t) in weights and quote(t) in ("buy","sell"):
+   if wallet(t) not in latest[mint(t)] or stamp(t)>stamp(latest[mint(t)][wallet(t)]): latest[mint(t)][wallet(t)]=t
+ c.execute("DELETE FROM token_scores WHERE chain=?",(chain,))
+ for m,ws in latest.items():
+  buys=[w for w,t in ws.items() if quote(t)=="buy"]; score=sum(weights[w] for w in buys)
+  if score>0:
+   c.execute("INSERT INTO token_scores(chain,token_mint,score,buy_wallets,total_wallets,updated_at) VALUES(?,?,?,?,?,?)",(chain,m,score,len(buys),len(ws),now))
 def cycle(c):
  now=int(time.time())
  for chain in CHAINS:
