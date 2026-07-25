@@ -3,7 +3,7 @@ from __future__ import annotations
 import json, logging, os, shutil, sqlite3, subprocess, time
 from collections import defaultdict
 LOG=logging.getLogger("paper-engine")
-DB=os.getenv("SENTINEL_DB","sentinel.db"); BUDGET=float(os.getenv("PAPER_BUDGET_SOL","0.1")); STAKE=float(os.getenv("PAPER_TRADE_SIZE_SOL","0.025")); WINDOW=int(os.getenv("GMGN_CLUSTER_WINDOW_SECONDS","1800")); COOLDOWN=int(os.getenv("GMGN_COOLDOWN_SECONDS","420")); POLL=int(os.getenv("GMGN_POLL_SECONDS","5")); ENTRY=float(os.getenv("GMGN_ENTRY_SCORE","0.25")); TRAIL_ACT=float(os.getenv("TRAILING_ACTIVATE_PCT","25"))/100; TRAIL_DIST=float(os.getenv("TRAILING_DISTANCE_PCT","15"))/100; HARD=float(os.getenv("HARD_STOP_PCT","45"))/100; LIMIT=int(os.getenv("GMGN_FEED_LIMIT","200")); CHAINS=[x.strip() for x in os.getenv("GMGN_CHAINS","sol,robinhood").split(",") if x.strip()]
+DB=os.getenv("SENTINEL_DB","sentinel.db"); BUDGET=float(os.getenv("PAPER_BUDGET_SOL","0.1")); STAKE=float(os.getenv("PAPER_TRADE_SIZE_SOL","0.025")); WINDOW=int(os.getenv("GMGN_CLUSTER_WINDOW_SECONDS","1800")); COOLDOWN=int(os.getenv("GMGN_COOLDOWN_SECONDS","420")); POLL=int(os.getenv("GMGN_POLL_SECONDS","15")); ENTRY=float(os.getenv("GMGN_ENTRY_SCORE","0.25")); TRAIL_ACT=float(os.getenv("TRAILING_ACTIVATE_PCT","25"))/100; TRAIL_DIST=float(os.getenv("TRAILING_DISTANCE_PCT","15"))/100; HARD=float(os.getenv("HARD_STOP_PCT","45"))/100; LIMIT=int(os.getenv("GMGN_FEED_LIMIT","200")); CHAINS=[x.strip() for x in os.getenv("GMGN_CHAINS","sol,robinhood").split(",") if x.strip()]
 MAX_HOLD=int(os.getenv("GMGN_MAX_HOLD_SECONDS","21600")); ZERO_TTL=int(os.getenv("GMGN_ZERO_WINRATE_TTL_SECONDS","3600")); PRICE_TTL=int(os.getenv("GMGN_PRICE_TTL_SECONDS","60"))
 def _find_gmgn():
     for name in ("gmgn-cli","gmgn-cli.cmd"):
@@ -41,7 +41,15 @@ def token_price(chain,mint):
  if hit and now-hit[0]<PRICE_TTL: return hit[1]
  p=0.0
  try:
-  row=(list_rows(cli(["token","info","--chain",chain,"--address",mint])) or [{}])[0]; p=n(row,"price","price_usd","usd_price","price_now")
+  row=(list_rows(cli(["token","info","--chain",chain,"--address",mint])) or [{}])[0]
+  raw_price = row.get("price")
+  if isinstance(raw_price, dict):
+   raw_price = raw_price.get("price") or raw_price.get("price_usd")
+  if raw_price is not None:
+   try: p = float(raw_price)
+   except: pass
+  if p <= 0:
+   p = n(row, "price_usd", "usd_price", "price_now")
  except Exception as e: LOG.warning("price %s %s: %s",chain,mint[:8],e)
  _price_cache[(chain,mint)]=(now,p); return p
 def allowed(t,chain):
