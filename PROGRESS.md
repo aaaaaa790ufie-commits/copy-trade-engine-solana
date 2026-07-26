@@ -1864,3 +1864,60 @@ engine cycling, panel `401` unauthenticated over the tunnel.
 
 **Уверенность: средне-высокая.** Pass 28 не чист — 1 находка, но заметно ближе к чистому
 проходу, чем предыдущие. Счётчик чистых проходов **0**.
+
+## Pass 29 — what the repository itself is publishing
+
+Lens: the repo as an artifact, not the code in it. Started by auditing Pass 28's own
+change — the atomic cursor write creates a sibling temp file — and following the
+`.gitignore` question that raised.
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 103 | **High** | `.gitignore` covers `*.db` but the backup scripts write `<db>.<timestamp>.bak`. **A 1.2 MB copy of the trading database was committed and pushed to this public repository** in `4a64c70` | `*.bak`, `*-shm`, `*-wal` ignored; file untracked | `751f627` |
+| 104 | Low | `.bot_state.*.tmp`, created by Pass 28's atomic write, was not ignored either — a crash between `mkstemp` and `os.replace` would leave one untracked in the repo root | Ignored | `751f627` |
+
+### 103
+
+`.gitignore`'s own comment reads "SQLite (data, keep schema only)". `*.db` never matched
+`sentinel.db.1785082118.bak`, and `git add -A` picked it up. Repository visibility
+confirmed `public` via the GitHub API.
+
+**No credentials in it** — verified rather than assumed: `engine_state` holds only
+`last_cycle` and `maint_sol`, and no table in the schema stores a token, key or secret.
+
+The sidecar patterns turned out to matter on their own. `*.db-shm` only ever matched the
+main database, so simply *opening* the backup read-only — which I did to inspect it —
+dropped `.bak-shm` and `.bak-wal` into the repo root untracked. All six artifact names
+are now verified ignored.
+
+### And then I checked my own reasoning, which was wrong
+
+The first version of ISSUES #9 said the backup published "the watch list", framed as the
+strategy itself. Then I read the rest of the tracked files: `wallets-quality.txt` and
+`wallets-blacklist.txt` are committed **deliberately** — README instructs it. A wallet
+list is public by design here, so that framing overshot. Measured instead:
+
+| | in backup | already public | newly exposed |
+|---|---:|---:|---:|
+| watched wallets | 1190 | 343 | **847** |
+| blacklist | 5568 | 500 | **5068** |
+| trade-by-trade P&L | 23 | 0 | **23** |
+| engine events | 509 | 0 | **509** |
+
+The finding survives — most of the current watch list, nearly the whole blacklist and
+the account's complete trading history were not previously public — but it is now stated
+at the size it actually is. Recorded because the correction is the point: a
+strong-sounding rationale that has not been measured is not evidence.
+
+The blob is still reachable in history. Removing it means a `filter-repo` rewrite and
+force-push, as was done for the leaked bot token — but that was a live credential and
+this is not, and a rewrite invalidates every clone. Left as the operator's call.
+
+```
+$ python -m unittest discover -s gmgn -p 'test_*.py'
+Ran 268 tests in 14.813s
+OK
+```
+
+**Уверенность: средне-высокая.** Pass 29 не чист — 2 находки, ни одной в коде движка.
+Счётчик чистых проходов **0**.
