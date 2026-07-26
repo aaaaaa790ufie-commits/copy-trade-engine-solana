@@ -1921,3 +1921,63 @@ OK
 
 **Уверенность: средне-высокая.** Pass 29 не чист — 2 находки, ни одной в коде движка.
 Счётчик чистых проходов **0**.
+
+## Pass 30 — alerts that depend on something else happening first
+
+Lens: every notification the engine can raise, asked one question — *what has to happen
+for this to reach the operator?* Two of them had an answer that was not "the thing it
+warns about".
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 105 | **High** | `BANKRUPT` was emitted from inside `enter()`, **after** the `score<ENTRY` guard, so it could only fire on a cycle where a cluster converged. At `ENTRY_SCORE=1.0` none converged for days | `check_solvency()` called from `exits()`, which runs every cycle | `27ca652` |
+| 106 | **High** | With `gmgn-cli` missing the engine logs `[WinError 2]` once per poll, journals **nothing**, and both `/status` and the panel report 🟢 **LIVE** | Feed failure journalled as a throttled `ERROR`; `run_engine` refuses to start without a runnable CLI | `651bf16` |
+
+### 105
+
+`RECOVERY` was checked at the end of `exits()` — every cycle, unconditionally. Its
+opposite was buried behind an entry decision. Driven end to end:
+
+```
+balance 0.02100  (stake 0.025)   open positions 0
+bankrupt flag: 0   BANKRUPT alerts emitted: 0
+...20 more cycles with no signal...
+bankrupt flag: 0   BANKRUPT alerts: 0
+operator was told: False
+```
+
+The panel was never wrong — `can_open` is computed independently, so the badge read
+«БЕЗ СВОБОДНЫХ СРЕДСТВ» throughout. But a badge is pull; the event is what reaches
+someone who is not looking. Both transitions now live in one function, and money
+committed to an open position is explicitly not insolvency — it comes back at the exit.
+
+### 106 came from running the project as a new reader would
+
+Fresh database, real API, the README path start to finish. That part was clean:
+
+```
+12 tables created, account seeded (0.1, 0.1)
+one real cycle -> 37 wallets discovered, feed fresh, engine alive
+all 8 webapp endpoints -> valid JSON
+all 8 bot commands     -> correct Russian, /status = 🟢 LIVE
+bot cursor on first run -> starts at the journal head, no replay
+```
+
+Then the same run with `gmgn-cli` absent — where a reader who skipped
+`npm install -g gmgn-cli` actually lands — and the engine reported itself healthy while
+doing nothing, with a Windows error number as the only clue. `feed_is_fresh` does turn
+False after ~20 consecutive failures, so the panel eventually says «нет данных»; that is
+five minutes of looking healthy followed by no explanation.
+
+The hint is conditional: it appears when the CLI genuinely cannot be resolved, and not
+when the CLI is fine and the API returned a 502 — a transient upstream failure is not a
+missing install, and saying so would send someone to fix the wrong thing.
+
+```
+$ python -m unittest discover -s gmgn -p 'test_*.py'
+Ran 277 tests in 15.007s
+OK
+```
+
+**Уверенность: средне-высокая.** Pass 30 не чист — 2 находки, обе про то, доходит ли
+предупреждение до человека. Счётчик чистых проходов **0**.
