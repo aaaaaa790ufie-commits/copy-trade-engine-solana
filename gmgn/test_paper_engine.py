@@ -1511,9 +1511,15 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(got["B"], "2", "parsing must resume after the block")
 
     def test_unterminated_quote_does_not_swallow_the_file(self):
-        got = self._parse('A=1\nBROKEN="never closed\nB=2\n')
+        # The parser warns on stderr here by design; silence it so a passing run stays
+        # readable and a real warning still stands out.
+        import contextlib
+        import io
+        with contextlib.redirect_stderr(io.StringIO()) as captured:
+            got = self._parse('A=1\nBROKEN="never closed\nB=2\n')
         self.assertEqual(got["A"], "1")
         self.assertIn("BROKEN", got)
+        self.assertIn("unterminated quote", captured.getvalue())
 
     def test_multiline_value_round_trips_through_drop_keys(self):
         pem = '-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----'

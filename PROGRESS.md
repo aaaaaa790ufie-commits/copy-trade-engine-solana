@@ -728,3 +728,38 @@ written into `.env.example`.
 
 **Confidence that `gmgn/` is production-ready: high.** Pass 8 found three issues, so
 it was not clean. Pass 9 follows.
+
+## Pass 9 — 2026-07-26 — **clean**
+
+Lens: the surfaces not yet stressed — the import graph after Pass 8 added
+cross-imports, concurrency, multi-process contention, repository hygiene, and the
+`CLAUDE.md` reference tables.
+
+### Nothing found worth fixing
+
+| Checked | Result |
+|---|---|
+| Import graph after `webapp` and `telegram_bot` began importing `paper_engine` | All nine modules import standalone; no cycles. Import costs 85 ms, spawns nothing, opens no database |
+| 200 concurrent requests across all endpoints, price cache rebinding every second | 200/200 HTTP 200 in 1.0 s, no empty bodies, no server-side traceback |
+| Three engines running 25 cycles each against one database | No errors — WAL plus the busy timeout absorbed it — and money still conserved |
+| Anything sensitive tracked by git | None. The only secret-shaped match is a docstring describing the bug that was fixed |
+| Working tree and untracked files | Clean |
+| `CLAUDE.md` bot-command table vs what is registered and answered | Exact match, both directions |
+| `CLAUDE.md` parameter table vs resolved config | No mismatches |
+| Live stack end to end | Page 200, `/api/health` 200, `/api/overview` 401 through the public origin; `/status` reports `🟢 LIVE`, last cycle 24 s ago |
+
+### One cosmetic change, excluded from the count
+
+The suite printed `warning: ... unterminated quote for BROKEN` — emitted by the very
+test that exercises that path. Its stderr is now captured and asserted on, so a
+passing run is silent and a genuine warning would stand out. The directive excludes
+cosmetic nitpicks from the stopping condition, and this is recorded as one rather
+than quietly counted as a finding.
+
+```
+$ python -m unittest discover -s gmgn -p 'test_*.py'
+Ran 135 tests in 9.645s
+OK
+```
+
+**This is the first clean pass.** One more is needed.
