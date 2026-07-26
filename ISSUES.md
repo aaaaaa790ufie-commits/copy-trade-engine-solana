@@ -279,10 +279,21 @@ What that file contains:
 **No credentials.** Verified directly: `engine_state` holds only `last_cycle` and
 `maint_sol`, and no table in the schema stores a token, key or secret.
 
-**What it does expose:** the watch list. For a copy-trading engine that is the strategy
-— which wallets to follow is precisely what the system spends its API budget
-discovering, and it is published in full, along with the account's trade-by-trade
-history.
+**What it actually adds, measured against what this repo already publishes on purpose.**
+`wallets-quality.txt` and `wallets-blacklist.txt` are committed deliberately — README
+says to run the collector and commit the result — so the watch list is not secret by the
+project's own design. The overlap is smaller than that makes it sound:
+
+| | in the backup | already public | newly exposed |
+|---|---:|---:|---:|
+| watched wallets | 1190 | 343 | **847** |
+| blacklist | 5568 | 500 | **5068** |
+| trade-by-trade P&L | 23 | 0 | **23** |
+| engine events | 509 | 0 | **509** |
+
+So the incremental exposure is real — most of the current watch list, nearly the whole
+blacklist, and the account's complete trading history — but "the watch list is the
+strategy" overstates it, because a curated subset of that list is published by design.
 
 **Fixed going forward:** `.gitignore` now covers `*.bak` and the `*-shm` / `*-wal`
 sidecars (which `*.db-shm` never matched for a `.bak` file), and the file is untracked
