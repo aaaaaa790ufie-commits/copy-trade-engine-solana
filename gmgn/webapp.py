@@ -268,7 +268,12 @@ def api_overview() -> dict:
             "equity_sol": equity,
             "open_value_sol": open_value,
             "total_pnl_sol": equity - initial,
-            "total_pnl_pct": ((equity / initial - 1) * 100) if initial else 0.0,
+            # None, not 0.0, when there is no positive base to measure against. A
+            # withdrawal larger than the capital ever contributed drives initial to zero
+            # or below, and `equity / initial` then flips the sign — a +0.2 SOL gain
+            # rendered as -133%. The SOL figure beside it stays correct either way, so
+            # the honest answer is to show that alone rather than an inverted percentage.
+            "total_pnl_pct": ((equity / initial - 1) * 100) if initial > 0 else None,
             "realized_pnl_sol": lifetime["realized_sol"],
             "reset_at": reset_at,
             "lifetime": lifetime,

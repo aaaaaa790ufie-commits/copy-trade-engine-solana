@@ -2351,8 +2351,8 @@ class PanelContractTests(unittest.TestCase):
         import webapp
         self.webapp = webapp
 
-    def _overview(self):
-        c = fresh_db()
+    def _overview(self, c=None):
+        c = c if c is not None else fresh_db()
         c.row_factory = sqlite3.Row
         original = self.webapp.db
         self.webapp.db = lambda: _NonClosing(c)
@@ -2373,6 +2373,23 @@ class PanelContractTests(unittest.TestCase):
         self.assertEqual(cfg["elite_winrate"], pe.ELITE_WINRATE)
         self.assertEqual(cfg["min_weighted_winrate"], pe.MIN_WEIGHTED_WINRATE)
         self.assertEqual(cfg["entry_score"], pe.ENTRY)
+
+    def test_percentage_return_is_undefined_without_a_positive_base(self):
+        # reset_account.py can now withdraw as well as top up, so initial_budget_sol can
+        # reach zero or go negative — taking out more than was ever put in. `equity /
+        # initial` then flips the sign: a real +0.20 SOL gain rendered as -133.33%.
+        # None means "no percentage"; the panel prints the SOL figure on its own.
+        c = fresh_db()
+        c.execute("UPDATE paper_account SET budget_sol=0.05, initial_budget_sol=-0.15 WHERE id=1")
+        d = self._overview(c)
+        self.assertAlmostEqual(d["total_pnl_sol"], 0.20, msg="the SOL figure stays exact")
+        self.assertIsNone(d["total_pnl_pct"], "an inverted percentage is worse than none")
+
+    def test_percentage_return_is_reported_normally_on_a_positive_base(self):
+        c = fresh_db()
+        c.execute("UPDATE paper_account SET budget_sol=0.15, initial_budget_sol=0.1 WHERE id=1")
+        d = self._overview(c)
+        self.assertAlmostEqual(d["total_pnl_pct"], 50.0)
 
     def test_both_periods_are_always_present(self):
         d = self._overview()

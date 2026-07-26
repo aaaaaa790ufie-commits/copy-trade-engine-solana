@@ -105,6 +105,8 @@ a.link{color:var(--accent);text-decoration:none}
 const TG = window.Telegram?.WebApp;
 const fmtSol = v => (v>=0?"":"-") + Math.abs(v).toFixed(5);
 const pct = v => (v>=0?"+":"") + v.toFixed(2) + "%";
+// " · +12.34%", or nothing at all when the API says the percentage is undefined.
+const pctPart = v => (v === null || v === undefined) ? "" : " · " + pct(v);
 const cls = v => v > 0 ? "up" : v < 0 ? "down" : "";
 const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 // Mints, wallet addresses and chain names all originate from the GMGN API, so they are
@@ -179,11 +181,14 @@ function renderHero(d){
   // carries whatever earlier configurations did, follows in parentheses.
   const cur = d.current_pnl_sol ?? d.total_pnl_sol;
   const curBase = d.current_base_sol || d.initial_sol;
-  const curPct = curBase ? (cur / curBase * 100) : 0;
+  // Needs a positive base. After a withdrawal larger than the capital ever put in the
+  // base can be zero or negative, and cur/base then flips the sign. The SOL figure is
+  // right either way, so show it alone rather than an inverted percentage.
+  const curPct = curBase > 0 ? (cur / curBase * 100) : null;
   const p = hero.querySelector(".pnl");
   p.className = "pnl num " + cls(cur);
-  p.innerHTML = `${cur>=0?"+":""}${fmtSol(cur)} SOL · ${pct(curPct)}` +
-    (d.reset_at ? `<span class="sub" style="margin-left:6px">(всего ${d.total_pnl_sol>=0?"+":""}${fmtSol(d.total_pnl_sol)} · ${pct(d.total_pnl_pct)})</span>` : "");
+  p.innerHTML = `${cur>=0?"+":""}${fmtSol(cur)} SOL${pctPart(curPct)}` +
+    (d.reset_at ? `<span class="sub" style="margin-left:6px">(всего ${d.total_pnl_sol>=0?"+":""}${fmtSol(d.total_pnl_sol)}${pctPart(d.total_pnl_pct)})</span>` : "");
 
   const b = hero.querySelector(".badge");
   b.className = "badge " + badge[0]; b.textContent = badge[1];

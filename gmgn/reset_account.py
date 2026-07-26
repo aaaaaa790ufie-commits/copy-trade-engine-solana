@@ -124,6 +124,12 @@ def main() -> None:
         print(f"{'top-up' if deposit >= 0 else 'withdrawal'} to reach target  {deposit:+.5f} SOL")
         print(f"initial adjusted to     {initial + deposit:.5f} SOL"
               "   (so cumulative P&L stays honest)")
+        if initial + deposit <= 0:
+            # Withdrawing more than was ever contributed. The SOL figures stay exact —
+            # cumulative P&L is still balance - initial — but percentage return has no
+            # base left to measure against, so the panel will show SOL only.
+            print("  note: more has been withdrawn than was ever put in, so percentage")
+            print("        return is undefined from here on. SOL figures stay exact.")
 
         if not args.apply:
             print("\ndry run — pass --apply to write")
