@@ -321,6 +321,33 @@ def throttled(c,key,now,interval):
  if row and now-row[0]<interval: return False
  c.execute("INSERT INTO engine_state(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(key,str(now),now))
  return True
+def check_solvency(c,now):
+ """Flag or clear bankruptcy from the account state alone. Both directions, one place.
+
+ The two transitions used to live apart, and only one of them ran reliably. RECOVERY was
+ checked at the end of exits(), which happens every cycle — fine. BANKRUPT was raised
+ inside enter(), *after* the `score<ENTRY` guard, so it could only fire on a cycle where
+ a signal actually converged. Signals are rare by design: at ENTRY_SCORE=1.0 none fired
+ for days. So an account could spend itself down, close its last position at a loss, and
+ sit below the stake indefinitely with the operator never told — the flag stayed 0 and no
+ event was emitted. The panel still showed it, because `can_open` is computed
+ independently, but the push notification is the part that reaches someone not looking.
+
+ Called from exits(), which runs every cycle whether or not anything converges.
+ """
+ row=c.execute("SELECT budget_sol,bankrupt FROM paper_account WHERE id=1").fetchone()
+ if not row: return
+ balance,flagged=row
+ if flagged and balance>=STAKE:
+  c.execute("UPDATE paper_account SET bankrupt=0,updated_at=? WHERE id=1",(now,))
+  emit(c,"RECOVERY",f"баланс {balance:.5f} SOL снова покрывает ставку {STAKE:.4f} — paper-трейдинг возобновлён")
+ elif not flagged and balance<STAKE:
+  # Money committed to open positions is a position, not insolvency. It comes back,
+  # at whatever the exit is worth, and the account is only stuck once nothing is left
+  # to come back.
+  if c.execute("SELECT 1 FROM paper_positions WHERE status='open' LIMIT 1").fetchone(): return
+  c.execute("UPDATE paper_account SET bankrupt=1,updated_at=? WHERE id=1",(now,))
+  emit(c,"BANKRUPT","обнулились в papertrading, скажи это своему hermes agent, будем разбираться по сделкам")
 def cluster(chain,trades,weights,now):
  """Latest action per wallet, per mint, inside the cluster window.
 
@@ -348,9 +375,9 @@ def enter(c,chain,trades,weights,now,winrates=None):
   p=token_price(chain,m) or (px(max(buys.values(),key=stamp)) if buys else 0); a=c.execute("SELECT budget_sol,bankrupt FROM paper_account WHERE id=1").fetchone()
   if p<=0 or not a: continue
   if a[0]<STAKE:
-   fully_invested=bool(c.execute("SELECT 1 FROM paper_positions WHERE status='open' LIMIT 1").fetchone())
-   if not a[1] and not fully_invested: c.execute("UPDATE paper_account SET bankrupt=1,updated_at=? WHERE id=1",(now,)); emit(c,"BANKRUPT","обнулились в papertrading, скажи это своему hermes agent, будем разбираться по сделкам")
-   continue
+   # Also checked here, not only in exits(), because earlier iterations of this loop may
+   # have just spent the balance down — the account can cross the line mid-cycle.
+   check_solvency(c,now); continue
   c.execute("UPDATE paper_account SET budget_sol=budget_sol-?,updated_at=? WHERE id=1",(STAKE,now))
   # token_mint is the primary key, so a token traded before still has its closed row.
   # Reopening reuses it — the trade journal in paper_trades keeps the full history.
@@ -404,9 +431,7 @@ def exits(c,chain,trades,now):
   _,hard_lvl,trail_lvl,armed=stop_level(entry,peak); hard=current<=hard_lvl; trailing=armed and current<=trail_lvl
   if hard or trailing or expired:
    reason=f"hard stop -{HARD*100:.0f}%" if hard else (f"trailing stop {TRAIL_DIST*100:.0f}%" if trailing else f"max hold {MAX_HOLD//3600}h"); pnl=stake*change; c.execute("UPDATE paper_account SET budget_sol=budget_sol+?,updated_at=? WHERE id=1",(stake+pnl,now)); c.execute("UPDATE paper_positions SET status='closed' WHERE token_mint=?",(m,)); c.execute("INSERT INTO paper_cooldowns VALUES(?,?,?) ON CONFLICT(token_mint,chain) DO UPDATE SET until_ts=excluded.until_ts",(m,chain,now+COOLDOWN)); c.execute("INSERT INTO paper_trades(token_mint,chain,action,price,stake_sol,pnl_sol,pnl_pct,reason,wallet_count,signal_score,event_ts) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(m,chain,"EXIT",current,stake,pnl,change,reason,count,score,now)); emit(c,"EXIT",f"{chain} {m} | {change*100:.2f}% ({pnl:+.5f} SOL) | {reason}")
- a=c.execute("SELECT budget_sol,bankrupt FROM paper_account WHERE id=1").fetchone()
- if a and a[1] and a[0]>=STAKE:
-  c.execute("UPDATE paper_account SET bankrupt=0,updated_at=? WHERE id=1",(now,)); emit(c,"RECOVERY",f"баланс {a[0]:.5f} SOL снова покрывает ставку {STAKE:.4f} — paper-трейдинг возобновлён")
+ check_solvency(c,now)
 def save_token_scores(c,chain,trades,weights,now):
  """Publish the same cluster view enter() acts on, so /weights matches reality."""
  latest=cluster(chain,trades,weights,now)

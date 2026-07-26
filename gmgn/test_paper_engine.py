@@ -1234,6 +1234,73 @@ class AccountingInvariantTests(unittest.TestCase):
         self._assert_invariants(c, "replayed signal")
 
 
+class SolvencyTests(unittest.TestCase):
+    """Running out of money has to be announced whether or not a signal fires.
+
+    BANKRUPT used to be emitted from inside enter(), after the `score<ENTRY` guard, so
+    it could only reach the operator on a cycle where a cluster actually converged. At
+    ENTRY_SCORE=1.0 none converged for days, so an account could empty itself and stay
+    empty in silence. The panel still showed it — can_open is computed independently —
+    but the push notification is what reaches someone who is not looking.
+    """
+
+    def setUp(self):
+        self._token_price = pe.token_price
+        self.addCleanup(lambda: setattr(pe, "token_price", self._token_price))
+
+    def _events(self, c, kind):
+        return c.execute("SELECT COUNT(*) FROM engine_events WHERE kind=?", (kind,)).fetchone()[0]
+
+    def test_bankruptcy_is_announced_without_a_signal(self):
+        c = fresh_db()
+        c.execute("UPDATE paper_account SET budget_sol=?", (pe.STAKE / 2,))
+        pe.exits(c, "sol", [], NOW)          # a plain cycle: nothing to close, nothing entered
+        self.assertEqual(c.execute("SELECT bankrupt FROM paper_account WHERE id=1").fetchone()[0], 1)
+        self.assertEqual(self._events(c, "BANKRUPT"), 1)
+
+    def test_it_is_announced_once_not_every_cycle(self):
+        c = fresh_db()
+        c.execute("UPDATE paper_account SET budget_sol=?", (pe.STAKE / 2,))
+        for i in range(6):
+            pe.exits(c, "sol", [], NOW + i)
+        self.assertEqual(self._events(c, "BANKRUPT"), 1, "one notification, not one per poll")
+
+    def test_money_in_an_open_position_is_not_bankruptcy(self):
+        c = fresh_db()
+        pe.token_price = lambda ch, m: 1.0
+        pe.enter(c, "sol", [{"maker": WALLET_A, "base_address": MINT_A, "side": "buy",
+                             "timestamp": NOW, "price_usd": 1.0, "launchpad": "pump"}],
+                 {WALLET_A: 1.0}, NOW, {WALLET_A: 0.95})
+        c.execute("UPDATE paper_account SET budget_sol=0.001")
+        pe.check_solvency(c, NOW)
+        self.assertEqual(c.execute("SELECT bankrupt FROM paper_account WHERE id=1").fetchone()[0], 0,
+                         "the stake is committed, not lost — it comes back at the exit")
+        self.assertEqual(self._events(c, "BANKRUPT"), 0)
+
+    def test_recovery_still_clears_the_flag(self):
+        c = fresh_db()
+        c.execute("UPDATE paper_account SET budget_sol=?", (pe.STAKE / 2,))
+        pe.exits(c, "sol", [], NOW)
+        c.execute("UPDATE paper_account SET budget_sol=0.1")
+        pe.exits(c, "sol", [], NOW + 1)
+        self.assertEqual(c.execute("SELECT bankrupt FROM paper_account WHERE id=1").fetchone()[0], 0)
+        self.assertEqual(self._events(c, "RECOVERY"), 1)
+
+    def test_the_bot_and_the_panel_agree_with_the_flag(self):
+        # Three surfaces read this: the flag, the panel's badge, and /status.
+        c = fresh_db()
+        c.execute("UPDATE paper_account SET budget_sol=?", (pe.STAKE / 2,))
+        pe.exits(c, "sol", [], NOW)
+        c.row_factory = sqlite3.Row
+        import webapp
+        original = webapp.db
+        webapp.db = lambda: _NonClosing(c)
+        self.addCleanup(lambda: setattr(webapp, "db", original))
+        d = webapp.api_overview()
+        self.assertTrue(d["bankrupt"])
+        self.assertFalse(d["can_open"])
+
+
 class ReEntryTests(unittest.TestCase):
     """paper_positions.token_mint is a PRIMARY KEY, so a token traded once leaves a
     closed row behind. Re-entering it after the cooldown used to raise IntegrityError,
