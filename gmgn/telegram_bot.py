@@ -325,17 +325,23 @@ def text(c: sqlite3.Connection, command: str) -> str:
         return "\n".join(lines)
 
     if command == "/wallets":
-        rs = c.execute(
-            "SELECT chain,COUNT(*),AVG(CASE WHEN winrate>0 THEN winrate END),"
-            f"SUM(winrate>={pe.ELITE_WINRATE}),SUM(winrate>={pe.WEIGHT_TIERS[0][0]}),"
-            f"SUM(winrate>={pe.MIN_WEIGHTED_WINRATE}) "
-            "FROM wallet_watch WHERE active=1 GROUP BY chain"
-        ).fetchall()
-        if not rs:
+        total, avg = c.execute(
+            "SELECT COUNT(*),AVG(CASE WHEN winrate>0 THEN winrate END) "
+            "FROM wallet_watch WHERE active=1").fetchone()
+        if not total:
             return "Кошельки ещё не загружены."
-        black = c.execute("SELECT COUNT(*) FROM wallet_blacklist").fetchone()[0]
+        # Bands come from the same function the panel uses. This command previously
+        # queried two of its columns with the same threshold — ELITE_WINRATE and
+        # WEIGHT_TIERS[0][0] are both 0.90 now — under labels reading "90%+" and "70%+",
+        # so it reported the same number twice under different names.
+        out = [f"Активных в пуле: {total} · средний winrate {(avg or 0)*100:.1f}%"]
+        for band in webapp.winrate_bands(c):
+            if not band["count"]:
+                continue
+            mark = " — входит один" if band["enters_alone"] else ""
+            out.append(f"  {band['label']}: {band['count']} (вес {band['weight']}){mark}")
         parked = c.execute("SELECT COUNT(*) FROM wallet_watch WHERE active=0").fetchone()[0]
-        out = [f"{r[0]}: активных {r[1]} · 90%+ {r[3]} · 70%+ {r[4]} · 50%+ {r[5]} · средний {(r[2] or 0)*100:.1f}%" for r in rs]
+        black = c.execute("SELECT COUNT(*) FROM wallet_blacklist").fetchone()[0]
         out.append(f"На паузе (мало сделок / не покупают): {parked}")
         out.append(f"В чёрном списке: {black}")
         return "\n".join(out)

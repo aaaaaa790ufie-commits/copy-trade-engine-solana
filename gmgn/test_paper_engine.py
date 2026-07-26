@@ -1774,6 +1774,62 @@ class OperatorFacingLabelTests(unittest.TestCase):
             pe.TOP_WINRATE = saved
 
 
+class WalletBucketReportTests(unittest.TestCase):
+    """/wallets reported the same count twice under two different labels.
+
+    It queried SUM(winrate>=ELITE_WINRATE) and SUM(winrate>=WEIGHT_TIERS[0][0]) — both
+    0.90 since the ladder changed — beneath hardcoded labels reading "90%+" and "70%+".
+    Live output was "90%+ 154 · 70%+ 154".
+    """
+
+    def setUp(self):
+        import telegram_bot as bot
+        self.bot = bot
+
+    def _pool(self):
+        c = fresh_db()
+        c.executemany(
+            "INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) "
+            "VALUES(?,?,?,?,?,?)",
+            [(mint_n(i), "sol", "gmgn", 0, wr, NOW) for i, wr in enumerate(
+                (0.95, 0.92, 0.85, 0.75, 0.74, 0.65, 0.55, 0.0))])
+        return c
+
+    def test_each_band_is_distinct(self):
+        c = self._pool()
+        counts = [b["count"] for b in __import__("webapp").winrate_bands(c)]
+        # 2 elite, 1 at 80-90, 2 at 70-80, 1 at 60-70, 1 at 50-60, 1 unscored.
+        self.assertEqual(counts, [2, 1, 2, 1, 1, 1])
+
+    def test_bands_partition_the_pool(self):
+        import webapp
+        c = self._pool()
+        total = c.execute("SELECT COUNT(*) FROM wallet_watch WHERE active=1").fetchone()[0]
+        below = c.execute(
+            "SELECT COUNT(*) FROM wallet_watch WHERE active=1 AND winrate>0 AND winrate<?",
+            (pe.MIN_WEIGHTED_WINRATE,)).fetchone()[0]
+        self.assertEqual(sum(b["count"] for b in webapp.winrate_bands(c)) + below, total,
+                         "every active wallet belongs to exactly one band")
+
+    def test_the_report_names_each_threshold_once(self):
+        c = self._pool()
+        out = self.bot.reply(c, "/wallets")
+        for band_label in ("90%+", "80–90%", "70–80%"):
+            self.assertEqual(out.count(band_label), 1, f"{band_label} appears once")
+        self.assertIn("входит один", out, "the band that enters alone is marked")
+
+    def test_the_report_follows_a_change_to_the_ladder(self):
+        saved = pe.WEIGHT_TIERS
+        try:
+            pe.WEIGHT_TIERS = ((0.80, 1.0), (0.60, 0.5))
+            out = self.bot.reply(self._pool(), "/wallets")
+            self.assertIn("80%+", out)
+            self.assertIn("60–80%", out)
+            self.assertNotIn("90%+", out, "a band that no longer exists must not be printed")
+        finally:
+            pe.WEIGHT_TIERS = saved
+
+
 class WeightDerivationTests(unittest.TestCase):
     """cycle() and cached_weights must derive weights the same way.
 
