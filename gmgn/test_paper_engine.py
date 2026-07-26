@@ -1774,6 +1774,58 @@ class OperatorFacingLabelTests(unittest.TestCase):
             pe.TOP_WINRATE = saved
 
 
+class NoHardcodedThresholdsTests(unittest.TestCase):
+    """No operator-facing text may spell out a number that also lives in code.
+
+    This went wrong three times in one day after the weight ladder moved from a 0.25 top
+    tier to 1.0 at 90%: two engine messages said "70%+" while counting TOP_WINRATE, and
+    /wallets printed the same count twice under "90%+" and "70%+". Each was found only
+    by reading live output. A label that duplicates a value will eventually disagree
+    with it, so the duplication itself is what this forbids.
+    """
+
+    def _named_values(self):
+        values = {
+            pe.ELITE_WINRATE: "ELITE_WINRATE",
+            pe.MIN_WEIGHTED_WINRATE: "MIN_WEIGHTED_WINRATE",
+            pe.TOP_WINRATE: "TOP_WINRATE",
+            config.HARD_STOP_PCT: "HARD_STOP_PCT",
+            config.TRAILING_ACTIVATE_PCT: "TRAILING_ACTIVATE_PCT",
+            config.TRAILING_DISTANCE_PCT: "TRAILING_DISTANCE_PCT",
+        }
+        for threshold, _ in pe.WEIGHT_TIERS:
+            values.setdefault(threshold * 100, "a WEIGHT_TIERS threshold")
+            values.setdefault(threshold, "a WEIGHT_TIERS threshold")
+        return values
+
+    def test_no_percentage_literal_duplicates_a_configured_threshold(self):
+        named = self._named_values()
+        human = re.compile(r"""["'`]([^"'`]*[А-Яа-я][^"'`]*)["'`]""")
+        root = pathlib.Path(__file__).resolve().parent
+        offenders = []
+        sources = [p for p in root.glob("*.py") if not p.name.startswith("test_")]
+        sources += list((root / "webapp").glob("*.html"))
+        for path in sources:
+            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if line.strip().startswith("#"):
+                    continue          # comments may quote a number to explain history
+                for text in human.findall(line):
+                    for num in re.findall(r"(?<![\w.])(\d+(?:\.\d+)?)\s*%", text):
+                        if float(num) in named:
+                            offenders.append(
+                                f"{path.name}:{lineno} writes '{num}%', which is "
+                                f"{named[float(num)]} — derive it instead")
+        self.assertEqual(offenders, [], "\n".join(offenders))
+
+    def test_the_check_would_catch_a_regression(self):
+        # Guard the guard: a literal equal to a live threshold must be detected.
+        named = self._named_values()
+        sample = f"кошельки {pe.TOP_WINRATE*100:.0f}%+ входят сами"
+        found = [n for n in re.findall(r"(?<![\w.])(\d+(?:\.\d+)?)\s*%", sample)
+                 if float(n) in named]
+        self.assertTrue(found, "the detector must recognise a duplicated threshold")
+
+
 class WalletBucketReportTests(unittest.TestCase):
     """/wallets reported the same count twice under two different labels.
 
