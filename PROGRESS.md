@@ -1219,3 +1219,50 @@ OK
 ```
 
 Neither pass was clean.
+
+## Pass 18 — 2026-07-26
+
+Lens: the engine had not entered a trade in hours. Is the pipeline broken, or is the
+threshold simply out of reach?
+
+**Not broken.** Scores compute, the launchpad filter passes, clusters form. Measured:
+
+| | |
+|---|---|
+| Elite (90%+) wallets in the pool | 154 |
+| Seen in the feed in the last hour | 0 |
+| Seen in the last 24 h | 25 |
+| Feed makers present in the weighted pool at all | 18% (18 of 101 over 4 samples) |
+| Best cluster score | 0.0625 against a threshold of 1.0 |
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 70 | Medium | `heartbeat()` is written even when every feed call fails, so `/status` said LIVE while the engine fetched nothing | `last_feed_ok` recorded separately; third state 🟡 НЕТ ДАННЫХ | `d442c1a` |
+| 71 | Medium | Nothing reported how close the engine came to entering, so a quiet market and an unreachable threshold were indistinguishable from outside | `signal_history` per cycle, surfaced in `/weights` and the panel | `168b644` |
+
+Neither is a code defect in the trading logic — the engine does exactly what was
+specified. Both are about the operator being unable to judge a configuration they chose.
+
+## Pass 19 — 2026-07-26
+
+Lens: the code written in Passes 17–18, held to the same standard as inherited code.
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 72 | Medium | Every chain in a cycle shares `signal_history`'s primary key, and the upsert assigned `excluded.best_score` — so a second chain erased the first. A threshold-strength signal vanished behind a weak one | Keeps the strongest, sums the mints | `4d9d622` |
+| 73 | Medium | `discover_wallets` unwrapped responses as `d.get("list") or (d if isinstance(d,list) else [])`, whose list fallback is unreachable — the `.get` raises first | `rows_under()`, verified against every shape | `8a222fb` |
+| 74 | Medium | `token traders` addresses reached `wallet_watch` through a raw `.get`, bypassing the base58 validation every other boundary applies | Validated | `8a222fb` |
+| 75 | Low | `list_rows` returned `{"list": None}` as one row consisting of the envelope | A present-but-null container means empty | `8a222fb` |
+| — | — | `paper_positions` is keyed by mint without chain, unlike every sibling table | Recorded as `ISSUES.md` item 5 — a primary-key change is a migration on live data, for a switched-off path | — |
+
+Finding 73 surfaced only because attribution was run through the full `cycle()` rather
+than by calling `enter()` directly as every existing test did. Finding 75 surfaced while
+writing the test for 73, and was fixed in `list_rows` rather than by relaxing the test.
+
+```
+$ python -m unittest discover -s gmgn -p 'test_*.py'
+Ran 204 tests in 10.743s
+OK
+```
+
+Live discovery unaffected: 160 wallets found, none malformed. All four endpoints parse.
