@@ -1300,3 +1300,94 @@ cycle. That is not coincidence: new code has survived zero review passes while t
 inherited code has survived nineteen. The working rule that follows — keep your own
 edits under the same scrutiny as inherited code, and never treat "I just wrote this" as
 "this is checked."
+
+## Pass 21 — the files nobody had tested
+
+Lens: coverage, not code. `supervisor.py`, `tunnel.py`, `reset_account.py` and
+`unban_wallets.py` had **zero tests between them** — and `supervisor.py` is the one file
+whose entire job is minimising engine downtime. Three of this pass's six findings were
+in it. The pass then checked those findings against the previous boot's log rather than
+against my reading of the code, which is how 79 and 80 were confirmed as real rather
+than theoretical.
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 78 | High | Restart backoff was a `wait()` **inside** the per-child loop, so a child sitting out its delay suspended the check on every other child. With the bot flapping at the 120s ceiling, an engine that died next stayed dead for up to two minutes — the exact outage the file exists to prevent | `restart_at` scheduled; `supervise_once()` never blocks | `436f6a7` |
+| 79 | High | The tunnel was started **before the webapp it points at**. It probes its own public URL for a real 200 before publishing, so on a clean boot the probe hit an empty port | Runs off the main thread, after loopback answers | `436f6a7` |
+| 80 | High | The webapp computes `REQUIRE_AUTH` once at import. Started auth-off and restarted by `publish()`, it was reachable **through the live tunnel, unauthenticated**, in between | Auth set before the child is spawned | `436f6a7` |
+| 81 | High | The dotenv parser looked for a value's closing quote at end-of-line, so `KEY="10"  # why` read as *unterminated* and swallowed the following line. That is the shape `.env.example` documents every tunable in | Closing quote found within the line | `3176b0d` |
+| 82 | High | `reset_account.py` clamped its `initial_budget_sol` adjustment with `max(0.0, deposit)`. A reset on a **profitable** account moves money out, so the gain silently vanished from cumulative P&L | Signed adjustment, both directions | `4f32c2e` |
+| 83 | Cosmetic | The panel coloured win rates against literal 90/70, twenty lines below a comment explaining that a hardcoded threshold here had already gone stale once | Read from the ladder | `7c108c3` |
+
+### 79 and 80 were confirmed from the production log, not from reading
+
+The previous boot, in its own words:
+
+```
+21:33:43  trying pinggy over ssh:443
+21:33:45  tunnel reports ready: https://mokgq-….pinggy-free.link
+21:34:18  …never served a request (SSL: DECRYPTION_FAILED_OR_BAD_RECORD_MAC) — treating as failed
+21:34:18  tunnel unavailable — the Mini App stays local-only
+21:34:18  starting engine                          ← 35s after boot
+21:34:18  tunnel dropped — reconnecting            ← 0.02s after "local-only"
+21:34:18  [webapp] mini app on 127.0.0.1:8770 (auth off — local only)
+21:34:22  Mini App published at https://fyjwt-….free.pinggy.net
+21:34:24  [webapp] mini app on 127.0.0.1:8770 (auth required)
+```
+
+Four separate costs in nine lines: 35 seconds of the engine not running, a free pinggy
+hostname burned on an attempt that could not have worked, a warning that was untrue
+0.02s after it was printed, and 21:34:22→21:34:24 with the panel live on the public
+internet and auth off. After the fix, same stack:
+
+```
+22:30:38  starting engine
+22:30:38  [webapp] mini app on 127.0.0.1:8770 (auth required)
+22:30:43  [engine] [cycle] 5.3s wallets=1272 open=0     ← 5s after boot, was 42s
+22:32:12  Mini App published at https://cikkz-….free.pinggy.net   ← first attempt
+```
+
+cloudflared still takes 90s to fail on this network, as documented — it just no longer
+delays anything. Auth verified against the public origin rather than the log:
+`/api/health` → 200, `/api/overview` → **401**.
+
+### 82 was reproduced before it was fixed
+
+```
+BEFORE  balance 0.20000  initial 0.10000  realised +0.10000   → true P&L +0.10000
+AFTER   balance 0.10000  initial 0.10000  reported P&L +0.00000
+        money conserved False
+```
+
+The script prints that conservation line itself, and printed `False` — after it had
+already committed. The bug had been sitting behind a correct-looking comment about
+keeping cumulative P&L honest, which is exactly what it did in the one direction that
+had ever been exercised. Existing tests covered `close_all()`, which was never wrong;
+the arithmetic was in `main()`, which nothing called.
+
+### Two things checked and found clean
+
+Not everything suspicious was a bug, and the checks are worth as much as the fixes:
+
+- The `.venv` python is a launcher stub that re-execs the base interpreter as a *child*,
+  so `Child.stop()` terminates the stub, not the worker. Tested directly — the child
+  dies with it. Not orphaned.
+- `discover_wallets` reads KOL rows with `wallet(t)` (`maker`/`wallet`) while the traders
+  path uses a wider key set. Probed the live endpoint: KOL rows carry `maker`, 5/5
+  resolve. The asymmetry is harmless.
+
+```
+$ python -m unittest discover -s gmgn -p 'test_*.py'
+Ran 222 tests in 12.097s
+OK
+```
+
+15 new tests: 10 for `supervisor.py` (which had none), 3 for `reset_account.main()`,
+2 for the dotenv parser — one of which uncomments every documented setting in
+`.env.example` and asserts each parses to exactly one clean value, so the template and
+the parser cannot drift apart again.
+
+**Уверенность: средне-высокая.** Pass 21 не чист — 6 находок, 5 из них серьёзные.
+Общая закономерность прохода: искал не в коде, а в *покрытии*, и все крупные находки
+оказались в файлах, у которых тестов не было вовсе. Счётчик чистых проходов остаётся
+**0**. Продолжаю Pass 22.
