@@ -763,3 +763,45 @@ OK
 ```
 
 **This is the first clean pass.** One more is needed.
+
+## Pass 10 — 2026-07-26
+
+Lens: re-read the two most-changed files fresh, then sweep systematically for any
+literal that mirrors a named value.
+
+### Found and fixed
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 55 | Medium | Pass 8's unification was incomplete. `WEIGHT_TIERS` became the source of truth and the panel and bot were rebuilt from it, but four hardcoded copies were left inside `paper_engine` itself — `cached_weights` filtered on `winrate>=0.50` in SQL, `cleanup_wallets` blacklisted below a literal `0.50`, and two call-out gates compared against `.70` | All four derive from `MIN_WEIGHTED_WINRATE` / `TOP_WINRATE` | `ca74456` |
+
+`cached_weights` is the one that mattered: raising the bottom tier would have left the
+SQL admitting wallets that then scored zero, so the dict would carry weight-0 entries
+that `enter()` sums into a score — the reported score and the wallet count behind it
+would have drifted apart.
+
+Verified by moving the ladder rather than by inspection. With the bottom tier at 0.65,
+a wallet at 0.55 is no longer admitted, one at 0.90 still is, and every returned weight
+is non-zero. Reverted, tier line confirmed intact.
+
+### Swept and found clean
+
+A scan for numeric literals equal to any named threshold returned only false positives,
+recorded rather than "fixed":
+
+- `config.py` — the literal *is* the default being defined, not a copy of it.
+- `mass_discovery.py --min-winrate 0.50` — numerically equal to the bottom weight tier
+  but a different concept: that tool's own quality gate, which should stay independent
+  of the engine's ladder.
+- `time.sleep(0.25)` in two rate-limit paths — coincidentally equal to `ENTRY_SCORE`.
+
+```
+$ python -m unittest discover -s gmgn -p 'test_*.py'
+Ran 137 tests in 9.606s
+OK
+```
+
+**Pass 10 was not clean**, so the run of consecutive clean passes resets to zero.
+Pass 9 was clean; Pass 10 was not; two more are needed. Notably this finding was an
+incomplete fix from Pass 8 — the passes keep catching this work rather than the
+original code, which is itself the argument for continuing.
