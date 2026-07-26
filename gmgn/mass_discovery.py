@@ -2,47 +2,53 @@
 """Build a fresh Solana quality-wallet file from GMGN OpenAPI data.
 
 The collector widens the candidate universe with Smart Money, KOL,
-trending/trench token lists, and each token's top traders. It then verifies
-candidates with GMGN 30d stats plus a 7d activity gate before atomically
-rewriting wallets-quality.txt. It never submits swaps and never needs a
-GMGN private key.
+trending/trench token lists, and each token's top traders, then verifies
+candidates with GMGN 30d stats before atomically rewriting
+wallets-quality.txt. It never submits swaps.
+
+Three gates decide who qualifies: 30d win rate (--min-winrate, default 0.50),
+30d sample size (--min-30d-trades, default 3), and 7d activity
+(--min-7d-trades, default 0, i.e. off — GMGN populates those fields sparsely
+and requiring them drops most otherwise-qualified wallets).
+
+Credentials come from the repo-local .env via config.py, the same as the
+engine — see gmgn_cli().
 """
 from __future__ import annotations
-import argparse, json, logging, os, shutil, subprocess, tempfile, time
+import argparse, logging, os, sys, tempfile, time
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import config  # noqa: E402
+from paper_engine import gmgn_cli, valid_address  # noqa: E402
+
 LOG = logging.getLogger("gmgn-mass-discovery")
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUT = ROOT / "wallets-quality.txt"
 DEFAULT_SEEDS = ROOT / "data" / "seed_wallets_sol.txt"
-
-def _find_gmgn():
-    for name in ("gmgn-cli","gmgn-cli.cmd"):
-        found=shutil.which(name)
-        if found: return found
-    return "gmgn-cli.cmd" if os.name=="nt" else "gmgn-cli"
-_GMGN=_find_gmgn()
+CLI_TIMEOUT = config.get_int("GMGN_DISCOVERY_CLI_TIMEOUT", 60)
 
 def cli(args: list[str]) -> Any:
-    proc = subprocess.run([_GMGN, *args, "--raw"], capture_output=True, text=True, timeout=60)
-    if proc.returncode:
-        raise RuntimeError((proc.stderr or proc.stdout).strip())
-    lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-    return json.loads(lines[-1]) if lines else {}
+    """Shared with the engine, so this tool uses the same repo-local credentials.
+
+    It previously spawned gmgn-cli with no env=, which meant it silently fell back to
+    the machine-wide ~/.config/gmgn keys instead of the project's .env.
+    """
+    return gmgn_cli(args, timeout=CLI_TIMEOUT)
 
 def _cli_retry(args: list[str], retries: int = 3, delay: float = 1.0) -> Any:
-    last_err = None
-    for attempt in range(retries):
+    last_err: Exception | None = None
+    for attempt in range(max(1, retries)):
         try:
             return cli(args)
         except RuntimeError as e:
             last_err = e
             LOG.warning("cli attempt %d/%d failed: %s", attempt + 1, retries, e)
             time.sleep(delay * (attempt + 1))
-    raise last_err  # type: ignore[arg-type]
+    raise last_err if last_err else RuntimeError(f"gmgn-cli produced no result for {args[:2]}")
 
 def unwrap(value: Any) -> Any:
     while isinstance(value, dict) and isinstance(value.get("data"), (dict, list)):
@@ -77,10 +83,23 @@ def number(obj: dict[str, Any], *keys: str, default: float = 0.0) -> float:
     return default
 
 def wallet_address(obj: dict[str, Any]) -> str:
-    return str(obj.get("maker") or obj.get("wallet") or obj.get("wallet_address") or obj.get("address") or "")
+    """First well-formed address among the field names GMGN uses, else "".
+
+    The result is written to wallets-quality.txt, which is committed, so malformed feed
+    data is rejected here rather than persisted.
+    """
+    for key in ("maker", "wallet", "wallet_address", "address"):
+        value = obj.get(key)
+        if value is not None and valid_address(str(value)):
+            return str(value)
+    return ""
 
 def token_address(obj: dict[str, Any]) -> str:
-    return str(obj.get("base_address") or obj.get("address") or obj.get("token_address") or "")
+    for key in ("base_address", "address", "token_address"):
+        value = obj.get(key)
+        if value is not None and valid_address(str(value)):
+            return str(value)
+    return ""
 
 def last_seen(obj: dict[str, Any]) -> int:
     return int(number(obj, "last_active_timestamp", "last_seen", "timestamp", "open_timestamp"))
@@ -144,16 +163,25 @@ def load_seeds(path: Path) -> dict[str, set[str]]:
     result: dict[str, set[str]] = defaultdict(set)
     if not path.exists():
         return result
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         value = line.strip()
-        if value and not value.startswith("#"):
-            result[value].add("manual_seed")
+        if not value or value.startswith("#"):
+            continue
+        if not valid_address(value):
+            LOG.warning("%s:%d is not a Solana address, skipping: %r", path.name, lineno, value[:64])
+            continue
+        result[value].add("manual_seed")
     return result
 
 def fetch_stats(wallets: list[str], args: argparse.Namespace) -> dict[str, dict[str, Any]]:
     stats: dict[str, dict[str, Any]] = {}
-    for start in range(0, len(wallets), args.stats_batch):
+    total = len(wallets)
+    for start in range(0, total, args.stats_batch):
         batch = wallets[start : start + args.stats_batch]
+        # This is the long phase — thousands of wallets at args.delay apiece. Without a
+        # progress line a full run looks indistinguishable from a hang.
+        if start and start % (args.stats_batch * 20) == 0:
+            LOG.info("verified %d/%d wallets (%d qualified so far)", start, total, len(stats))
         try:
             payload = _cli_retry(["portfolio", "stats", "--chain", "sol", "--wallet", *batch, "--period", "30d"])
             got = rows(payload)

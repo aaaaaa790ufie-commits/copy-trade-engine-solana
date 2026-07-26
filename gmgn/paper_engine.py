@@ -18,10 +18,23 @@ def _find_gmgn():
         if os.path.isfile(npm_bin): return npm_bin
     return "gmgn-cli.cmd" if os.name=="nt" else "gmgn-cli"
 _GMGN=_find_gmgn()
-def cli(args):
- p=subprocess.run([_GMGN,*args,"--raw"],capture_output=True,text=True,timeout=45,env=config.gmgn_env())
- if p.returncode: raise RuntimeError((p.stderr or p.stdout).strip())
- lines=[x.strip() for x in p.stdout.splitlines() if x.strip()]; return json.loads(lines[-1]) if lines else {}
+CLI_TIMEOUT=config.get_int("GMGN_CLI_TIMEOUT",45)
+def gmgn_cli(args,timeout=None):
+ """Run gmgn-cli with the repo-local credentials and return its parsed JSON.
+
+ Shared with mass_discovery so there is one place that decides where the binary is
+ and which credentials it sees — the env= is what keeps every API key inside the
+ project directory instead of falling back to ~/.config/gmgn."""
+ # encoding must be explicit: text=True decodes with the locale codec, and on a Russian
+ # Windows that is cp1251, which raises UnicodeDecodeError the moment a token name
+ # contains an emoji or CJK character — a crash on the engine's main API path.
+ p=subprocess.run([_GMGN,*args,"--raw"],capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=timeout or CLI_TIMEOUT,env=config.gmgn_env())
+ if p.returncode: raise RuntimeError((p.stderr or p.stdout or "").strip() or f"gmgn-cli exited {p.returncode}")
+ lines=[x.strip() for x in (p.stdout or "").splitlines() if x.strip()]
+ if not lines: return {}
+ try: return json.loads(lines[-1])
+ except json.JSONDecodeError as e: raise RuntimeError(f"gmgn-cli returned non-JSON: {lines[-1][:120]}") from e
+def cli(args): return gmgn_cli(args)
 def list_rows(x):
  if isinstance(x,dict) and isinstance(x.get("data"),dict): x=x["data"]
  if isinstance(x,dict) and isinstance(x.get("list"),list): x=x["list"]

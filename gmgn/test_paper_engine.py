@@ -1,6 +1,7 @@
 import os
 import pathlib
 import sqlite3
+import sys
 import tempfile
 import time
 import unittest
@@ -723,6 +724,147 @@ class WebappPositionTests(unittest.TestCase):
         merged = self.webapp.merge_marks(["a"], {"a": 5.0}, {})
         merged = self.webapp.merge_marks(["a"], {}, merged)  # API failed this pass
         self.assertEqual(merged["a"], 5.0, "one bad poll must not blank the position")
+
+
+class GmgnCliTests(unittest.TestCase):
+    """The subprocess boundary to gmgn-cli, exercised with a real subprocess."""
+
+    def setUp(self):
+        self._gmgn = pe._GMGN
+
+    def tearDown(self):
+        pe._GMGN = self._gmgn
+
+    def _stub(self, body: str):
+        """Point gmgn_cli at a python script that prints `body` as UTF-8 bytes."""
+        script = (
+            "import sys\n"
+            "sys.stdout.buffer.write(%r)\n" % body.encode("utf-8")
+        )
+        pe._GMGN = sys.executable
+        return script
+
+    def _run(self, body: str):
+        return pe.gmgn_cli(["-c", self._stub(body)])
+
+    def test_non_latin_output_does_not_crash(self):
+        # Regression: text=True decoded with the locale codec. On this machine that is
+        # cp1251, so a token name containing an emoji raised UnicodeDecodeError on the
+        # engine's main API path — and silently cut mass_discovery's results.
+        got = self._run('{"data": {"list": [{"symbol": "\U0001f680 中文", "price": "1.5"}]}}')
+        rows = pe.list_rows(got)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["price"], "1.5")
+
+    def test_empty_output_is_an_empty_result(self):
+        self.assertEqual(self._run(""), {})
+
+    def test_non_json_output_is_reported_clearly(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run("command not found")
+        self.assertIn("non-JSON", str(ctx.exception))
+
+    def test_non_zero_exit_raises_with_its_output(self):
+        pe._GMGN = sys.executable
+        with self.assertRaises(RuntimeError) as ctx:
+            pe.gmgn_cli(["-c", "import sys; print('boom, no key'); sys.exit(3)"])
+        self.assertIn("boom, no key", str(ctx.exception))
+
+    def test_last_line_wins_over_leading_chatter(self):
+        got = self._run('warming up\nstill working\n{"ok": true}\n')
+        self.assertEqual(got, {"ok": True})
+
+    def test_credentials_come_from_the_repo_env(self):
+        # The whole point of gmgn_env(): every API key stays inside the project.
+        env = config.gmgn_env()
+        for key in config.GMGN_CRED_KEYS:
+            if config.get(key):
+                self.assertEqual(env[key], config.get(key))
+
+
+class TunnelTests(unittest.TestCase):
+    """The URL handed to the bot must be a URL that actually serves."""
+
+    def setUp(self):
+        import tunnel
+        self.tunnel = tunnel
+        self.t = tunnel.Tunnel(port=8770, provider="pinggy")
+        self._probe = tunnel.PROBE_TIMEOUT
+
+    def tearDown(self):
+        self.tunnel.PROBE_TIMEOUT = self._probe
+
+    class _FakeProc:
+        """A process whose stdout yields fixed lines and then ends."""
+
+        def __init__(self, lines):
+            self.stdout = iter(lines)
+            self.returncode = 0
+
+        def poll(self):
+            return 0
+
+    def test_stale_reader_cannot_publish_an_old_url(self):
+        # cloudflared is tried once per protocol, so a reader from the previous attempt
+        # is routinely still draining its pipe. Without the generation check it would
+        # write the dead hostname into self.url and start() would return it.
+        old = self._FakeProc(["https://old-tunnel.pinggy.link is live\n"])
+        self.t._generation = 5
+        self.t._read(old, 4, self.tunnel.PINGGY_URL_RE, self.tunnel.PINGGY_URL_RE)
+
+        self.assertEqual(self.t.url, "", "a superseded reader must not touch shared state")
+        self.assertFalse(self.t._ready.is_set())
+
+    def test_current_reader_publishes_its_url(self):
+        proc = self._FakeProc(["forwarding https://new-tunnel.pinggy.link ->\n"])
+        self.t._generation = 5
+        self.t._read(proc, 5, self.tunnel.PINGGY_URL_RE, self.tunnel.PINGGY_URL_RE)
+
+        self.assertEqual(self.t.url, "https://new-tunnel.pinggy.link")
+        self.assertTrue(self.t._ready.is_set())
+
+    def test_url_that_never_answers_is_rejected(self):
+        # Regression: readiness was inferred from a log line. cloudflared prints its
+        # hostname seconds before it has an edge connection, so the URL returns 530 and
+        # the bot installed a Mini App button that opened an error page.
+        self.tunnel.PROBE_TIMEOUT = 1
+        # A closed local port refuses instantly; a bogus hostname would spend the whole
+        # test in DNS resolution.
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        self.t.url = f"http://127.0.0.1:{port}"
+        self.assertFalse(self.t._serves())
+
+    def test_url_that_answers_is_accepted(self):
+        import http.server
+        import threading as th
+
+        class OK(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.HTTPServer(("127.0.0.1", 0), OK)
+        th.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            self.t.url = f"http://127.0.0.1:{srv.server_port}"
+            self.assertTrue(self.t._serves())
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_url_patterns_match_real_hostnames(self):
+        self.assertTrue(self.tunnel.CF_URL_RE.search("https://foo-bar-baz.trycloudflare.com"))
+        self.assertTrue(self.tunnel.PINGGY_URL_RE.search("https://rnxyz-1-2-3-4.a.free.pinggy.link"))
+        self.assertTrue(self.tunnel.CF_READY_RE.search("INF Registered tunnel connection connIndex=0"))
 
 
 class ConfigParsingTests(unittest.TestCase):

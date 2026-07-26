@@ -31,7 +31,17 @@ gmgn-cli config --check
 python gmgn/mass_discovery.py --target 3000 --max-tokens 300 --min-winrate 0.50 --min-7d-trades 1 --min-30d-trades 5
 ```
 
-The collector combines `track smartmoney`, `track kol`, trending and trench tokens, and `token traders`, then verifies candidates through `portfolio stats`. It writes atomically and applies the 7-day activity gate, 30-day win-rate gate, and minimum 30-day sample gate. It never calls swap and never needs `GMGN_PRIVATE_KEY`.
+The collector combines `track smartmoney`, `track kol`, trending and trench tokens, and `token traders`, then verifies candidates through `portfolio stats`. It writes atomically and never calls swap.
+
+Three gates are applied, with these defaults:
+
+| Gate | Flag | Default |
+|---|---|---:|
+| 30-day win rate | `--min-winrate` | 0.50 |
+| 30-day sample size | `--min-30d-trades` | 3 |
+| 7-day activity | `--min-7d-trades` | 0 — **off** |
+
+The 7-day gate is disabled by default: GMGN's activity fields are sparsely populated, and requiring them dropped most otherwise-qualified wallets. Pass `--min-7d-trades 1` to enforce it. Credentials come from the repo-local `.env`, the same as the engine.
 
 For a cheap preview:
 

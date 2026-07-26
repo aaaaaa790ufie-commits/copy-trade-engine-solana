@@ -28,6 +28,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -42,6 +43,9 @@ CF_READY_RE = re.compile(r"Registered tunnel connection|Connection [0-9a-f-]+ re
 PINGGY_URL_RE = re.compile(r"https://[a-z0-9.-]+\.(?:pinggy\.link|pinggy-free\.link|free\.pinggy\.net)")
 
 START_TIMEOUT = config.get_int("TUNNEL_START_TIMEOUT", 45)
+# How long the public URL is given to actually answer /api/health after the provider
+# claims readiness. cloudflared routinely needs a few seconds here.
+PROBE_TIMEOUT = config.get_int("TUNNEL_PROBE_TIMEOUT", 30)
 PROVIDER = config.get("TUNNEL_PROVIDER", "auto").strip().lower()
 # quic needs outbound UDP 7844; http2 rides TCP 7844. Both are commonly filtered.
 CF_PROTOCOLS = [p.strip() for p in config.get("TUNNEL_PROTOCOLS", "quic,http2").split(",") if p.strip()]
@@ -81,6 +85,9 @@ class Tunnel:
         self.active_provider: str = ""
         self._ready = threading.Event()
         self._stopping = threading.Event()
+        # Incremented per spawn so a reader thread left over from a previous attempt
+        # cannot write a stale URL into self.url. See _spawn().
+        self._generation = 0
 
     # -- public API ---------------------------------------------------------
 
@@ -130,6 +137,10 @@ class Tunnel:
                 self.proc.wait(timeout=10)
             except Exception:
                 self.proc.kill()
+                try:
+                    self.proc.wait(timeout=5)  # reap it rather than leave a zombie
+                except Exception:
+                    LOG.warning("tunnel process did not exit after kill")
 
     def close(self) -> None:
         self._stopping.set()
@@ -176,24 +187,61 @@ class Tunnel:
     def _spawn(self, argv: list[str], url_re: re.Pattern, ready_re: re.Pattern) -> bool:
         self.url = ""
         self._ready.clear()
+        # A reader from a previous attempt can still be draining its pipe after the
+        # process was stopped — cloudflared is tried once per protocol, so this happens
+        # on the normal path. Without a generation token that stale reader would publish
+        # the old hostname into self.url and set _ready, and start() would hand the bot a
+        # URL that no longer serves.
+        self._generation += 1
+        generation = self._generation
         self.proc = subprocess.Popen(
             argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             text=True, encoding="utf-8", errors="replace", bufsize=1,
         )
-        threading.Thread(target=self._read, args=(url_re, ready_re), daemon=True, name="tunnel-log").start()
-        return self._ready.wait(START_TIMEOUT) and bool(self.url)
+        threading.Thread(target=self._read, args=(self.proc, generation, url_re, ready_re),
+                         daemon=True, name="tunnel-log").start()
+        if not (self._ready.wait(START_TIMEOUT) and self.url):
+            return False
+        return self._serves()
 
-    def _read(self, url_re: re.Pattern, ready_re: re.Pattern) -> None:
-        proc = self.proc
-        if not proc or not proc.stdout:
+    def _serves(self) -> bool:
+        """Confirm the public URL actually answers before anyone is told about it.
+
+        Readiness is inferred from a log line, and that inference has been wrong before:
+        cloudflared prints its hostname seconds ahead of having an edge connection, so the
+        URL returns HTTP 530 for a while. One unauthenticated endpoint exists for exactly
+        this — /api/health — so ask it rather than trust the log.
+        """
+        probe = f"{self.url}/api/health"
+        deadline = time.monotonic() + PROBE_TIMEOUT
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                with urllib.request.urlopen(probe, timeout=10) as r:
+                    if r.status == 200:
+                        return True
+                    last = f"HTTP {r.status}"
+            except Exception as e:  # not up yet, DNS still propagating, edge not ready
+                last = str(e)
+            if time.monotonic() + 2 >= deadline:
+                break  # no point sleeping through the remaining budget
+            time.sleep(2)
+        LOG.warning("%s never served a request (%s) — treating as failed", self.url, last)
+        return False
+
+    def _read(self, proc: subprocess.Popen, generation: int, url_re: re.Pattern,
+              ready_re: re.Pattern) -> None:
+        if not proc.stdout:
             return
         for line in proc.stdout:
+            if generation != self._generation:
+                return  # superseded by a newer attempt; stop touching shared state
             if not self.url:
                 m = url_re.search(line)
                 if m:
                     self.url = m.group(0)
             if self.url and not self._ready.is_set() and ready_re.search(line):
-                LOG.info("tunnel up: %s", self.url)
+                LOG.info("tunnel reports ready: %s", self.url)
                 self._ready.set()
             # These tools are chatty; only surface problems once we are connected.
             if self._ready.is_set() and "ERR" in line:
