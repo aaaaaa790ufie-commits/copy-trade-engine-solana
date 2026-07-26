@@ -1819,6 +1819,35 @@ class SignalReachTests(unittest.TestCase):
         self.assertNotIn(old, kept, "beyond the window it must be dropped")
         self.assertEqual(len(kept), 1)
 
+    def test_a_second_chain_does_not_erase_the_first(self):
+        """Every chain in a cycle shares `now`, which is the primary key.
+
+        Assigning excluded.best_score let the last chain overwrite the others, so a
+        signal that reached the threshold on one chain vanished behind a weak one on the
+        next — and the metric reported no entry-strength signal at all.
+        """
+        c = fresh_db()
+        trades = [{"maker": WALLET_A, "base_address": MINT_A, "side": "buy",
+                   "timestamp": NOW, "price_usd": 1.0, "launchpad": "pump"}]
+        pe.save_token_scores(c, "sol", trades, {WALLET_A: pe.ENTRY}, NOW)
+        pe.save_token_scores(c, "robinhood", trades, {WALLET_A: 0.03125}, NOW)
+
+        s = pe.signal_summary(c)
+        self.assertEqual(s["cycles"], 1, "one cycle, however many chains")
+        self.assertAlmostEqual(s["best_score"], pe.ENTRY, msg="the strongest signal survives")
+        self.assertEqual(s["cycles_at_threshold"], 1)
+
+    def test_mints_accumulate_across_chains(self):
+        c = fresh_db()
+        t1 = [{"maker": WALLET_A, "base_address": MINT_A, "side": "buy",
+               "timestamp": NOW, "price_usd": 1.0, "launchpad": "pump"}]
+        t2 = [{"maker": WALLET_A, "base_address": MINT_B, "side": "buy",
+               "timestamp": NOW, "price_usd": 1.0, "launchpad": "pump"}]
+        pe.save_token_scores(c, "sol", t1, {WALLET_A: 0.25}, NOW)
+        pe.save_token_scores(c, "robinhood", t2, {WALLET_A: 0.25}, NOW)
+        mints = c.execute("SELECT mints FROM signal_history WHERE event_ts=?", (NOW,)).fetchone()[0]
+        self.assertEqual(mints, 2, "each chain contributes its own mints")
+
     def test_an_empty_cluster_still_records_a_cycle(self):
         # A cycle where nothing scored is itself the answer to "why no trades".
         c = fresh_db()

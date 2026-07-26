@@ -124,7 +124,28 @@ account based on an inference, not an observed price.
 
 ---
 
-## 5. `robinhood` chain support is unverified
+## 5. `paper_positions` is keyed by mint alone, not by (mint, chain)
+
+**Status:** open. Dormant while `GMGN_CHAINS` is `sol` only.
+
+`paper_positions(token_mint TEXT PRIMARY KEY)` has no chain in its key, while
+`paper_cooldowns`, `wallet_watch` and `token_scores` all key on `(…, chain)`. If two
+chains were ever polled and the same mint string appeared on both, the second entry
+would overwrite the first through `enter()`'s `ON CONFLICT DO UPDATE`, silently
+replacing one open position with another — including its `chain`, `entry_price` and
+`stake_sol`. The account would then hold one position where it had paid for two.
+
+Solana mint addresses are effectively unique, so this cannot bite on the current
+configuration, and the same is true of any single-chain setup.
+
+**Not done automatically because** changing a primary key means rebuilding the table on
+the operator's live database. That is a migration, not an edit, and it is not worth
+running against real data to fix a path that is switched off. If a second chain is ever
+enabled, this must be fixed first.
+
+---
+
+## 6. `robinhood` chain support is unverified
 
 **Status:** open, documented.
 

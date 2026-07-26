@@ -370,7 +370,13 @@ def record_signal_strength(c,now,latest,weights):
  An engine that is cycling, scoring and entering nothing looks exactly like one whose
  threshold is out of reach. This is the number that tells them apart."""
  best=max((score_of(ws,weights)[1] for ws in latest.values()),default=0.0)
- c.execute("INSERT INTO signal_history VALUES(?,?,?) ON CONFLICT(event_ts) DO UPDATE SET best_score=excluded.best_score,mints=excluded.mints",(now,best,len(latest)))
+ # Every chain in a cycle shares `now`, which is the primary key. Assigning
+ # excluded.best_score let the last chain overwrite the others, so a strong signal on
+ # one chain vanished behind a weak one on the next. Keep the strongest and add up the
+ # mints instead.
+ c.execute("INSERT INTO signal_history VALUES(?,?,?) ON CONFLICT(event_ts) DO UPDATE SET "
+           "best_score=MAX(best_score,excluded.best_score),mints=mints+excluded.mints",
+           (now,best,len(latest)))
  c.execute("DELETE FROM signal_history WHERE event_ts<?",(now-SIGNAL_HISTORY_HOURS*3600,))
  return best
 def signal_summary(c,now=None):
