@@ -1657,3 +1657,77 @@ from its first request, tunnel published on the first attempt at 00:15:16.
 
 **Уверенность: средне-высокая.** Pass 25 не чист — 3 находки, одна серьёзная и найденная
 только измерением live-базы, а не чтением кода. Счётчик чистых проходов **0**.
+
+## Pass 26 — the mirror of yesterday's fix, and a port two servers could share
+
+Lens: the previous pass's own code again (fifth pass running), then the one layer with
+no coverage at all — the HTTP server itself, which is the part facing the internet.
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 97 | High | Pass 25 ordered never-scored wallets first. A wallet the API answers about with **no usable stats** keeps `winrate=0` *and* has its `updated_at` bumped — resetting the very timer `cleanup_wallets` deletes it by. It never ages out and never leaves the front. Enough of them and no scored wallet is re-checked again | Batch split: each group guaranteed half, takes what the other leaves | `ca6e3d7` |
+| 98 | **High** | `serve()` did `port = port or config.WEBAPP_PORT`, so an explicit `port=0` became 8770. Worse, `allow_reuse_address` lets a second process **bind a port a live server already holds** on Windows — both succeed, the OS splits connections, and the standalone instance has no `WEBAPP_PUBLIC_URL` so it answers **without a signature** | `port=0` honoured; exclusive bind on Windows; clear refusal | `927e9c7` |
+
+### 97: I created the starvation I had just removed
+
+Pass 25's report claimed the fix "costs nothing". It cost the mirror image, one pass
+later, in a case the surrounding code's own comment already describes ("manual seeds
+especially, since cleanup never drops them").
+
+Not hypothetical — the live pool proved it within the hour. 65 unscored wallets, one
+pass under the unscored-first order queried 60 of them, and the backlog fell to 59.
+**Six drained; 54 were answered-but-unusable** — exactly the permanent occupants.
+
+```
+unscored  stale  ->  picked = unscored + stale
+      65   1177  ->      60 =       30 +    30
+     200   1177  ->      60 =       30 +    30      <- duds cannot consume the batch
+       0   1177  ->      60 =        0 +    60
+      65      0  ->      60 =       60 +     0
+```
+
+Capping their share also made them self-clearing, which neither single order did: the
+half not queried keeps its old `updated_at`, ages past `ZERO_TTL`, and is deleted. The
+test I wrote asserting "these never age out" **failed** — 50 of 80 duds were gone after
+three passes. The premise was mine and it was wrong.
+
+### 98 was found by a test that could not pass, and the test was right
+
+An end-to-end HTTP test could not make an authenticated request succeed. The obvious
+reading was a broken fixture. It was not: `port=0` silently became the production port,
+the test server bound *on top of* the running webapp, and the two split connections
+between them — which is why patching `Handler._authorized` recorded nothing while the
+response was unmistakably that handler's 401.
+
+```
+port=0  resolves to: 8770               <- the `or` swallows it
+second bind to the live production port: SUCCEEDED (no error raised)
+```
+
+The security consequence is not confined to tests. README documents running the
+components individually, so `python gmgn/webapp.py` beside a running supervisor is a
+normal thing to do — and that second instance computes `REQUIRE_AUTH` with no public URL
+in its environment, so it serves the account and wallet data unauthenticated while
+taking roughly half the requests arriving down the tunnel.
+
+On POSIX `SO_REUSEADDR` cannot steal an active listener, so the stdlib default stays;
+it is disabled on Windows only, where it can.
+
+### The layer that had never been tested
+
+Every webapp test called route handlers directly, skipping routing, the auth gate, the
+error-to-status mapping, headers, HEAD and static serving. Nine tests now issue real
+requests over a real socket, including that a signed request *is* answered — without
+which the 401 assertions would also pass against a server that refused everything.
+
+```
+$ python -m unittest discover -s gmgn -p 'test_*.py'
+Ran 261 tests in 15.157s
+OK
+```
+
+Live after both: engine cycling, webapp `auth required`, panel over the tunnel
+`/api/health` 200 and `/api/overview` **401**. Refresh queue splitting 30/30 as designed.
+
+**Уверенность: средне-высокая.** Pass 26 не чист — 2 находки, обе серьёзные, одна из них
+исправление моего же исправления. Счётчик чистых проходов **0**.
