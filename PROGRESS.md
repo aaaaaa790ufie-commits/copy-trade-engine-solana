@@ -1810,3 +1810,57 @@ OK
 
 **Уверенность: средне-высокая.** Pass 27 не чист — 3 находки. Счётчик чистых проходов
 **0**.
+
+## Pass 28 — durability of the things that carry state across a restart
+
+Lens: what survives being killed. The supervisor terminates children routinely — every
+tunnel URL change, hourly on a free session — so anything written without care meets an
+interrupt on a schedule.
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 102 | Medium | `save_cursor` used a plain `write_text`. A torn file makes `load_cursor` return `None`, `catch_up` read that as a first run, and **the entire pending backlog is skipped** — the exact outcome `catch_up` exists to prevent | Temp file, fsync, `os.replace` | `ac90369` |
+
+```
+clean write -> load_cursor() = 42
+torn write  -> load_cursor() = None
+5 EXIT events waiting, cursor after catch_up: 5     (all five skipped)
+```
+
+The project already had the pattern — `mass_discovery.write_quality` writes
+`wallets-quality.txt` exactly this way. The bot's state file simply never used it.
+Verified in production after restart: `{"last_event": 560}`, zero temp files left.
+
+### Four things checked and found correct
+
+Most of this pass was verification that came back clean. Recording it, because a checked
+negative is the difference between "no bug here" and "nobody looked".
+
+- **Attribution across a re-entry.** `wallet_attribution` matches an entry to "the next
+  EXIT on that mint" and calls it exact *because a mint has at most one open position at
+  a time* — yet every existing test used distinct mints, so the case that claim is about
+  was never driven. It is correct: the first signal owns the winning round trip, the
+  second the losing one, totals still reconcile. Now a test.
+- **`signal_history` primary-key collisions.** Two chains in one cycle share `now`. The
+  strong signal survives the weak one (`best_score` 1.0 kept) and mints are summed, not
+  replaced.
+- **`token_price` latency in the stop path.** `exits()` prices positions serially, which
+  is the same shape as the starvation fixed in an earlier pass. Measured: ~1.0 s per call
+  (n=8, min 0.97, max 1.08), at most 4 positions at the current budget, and a 60 s cache
+  in front. ~4 s, not a risk. It is O(open positions) though, so `CLAUDE.md` now says so
+  where the ordering invariant is documented — raising the budget would need it
+  revisited.
+- **Price cache eviction.** Two-tier: expire past TTL, then drop the oldest half if still
+  at the cap. Bounded, as documented.
+
+```
+$ python -m unittest discover -s gmgn -p 'test_*.py'
+Ran 268 tests in 14.852s
+OK
+```
+
+Live: unscored wallet backlog down from 65 to 4 as the Pass 25/26 queue fix drains it,
+engine cycling, panel `401` unauthenticated over the tunnel.
+
+**Уверенность: средне-высокая.** Pass 28 не чист — 1 находка, но заметно ближе к чистому
+проходу, чем предыдущие. Счётчик чистых проходов **0**.
