@@ -34,8 +34,23 @@ def n(o,*keys):
    try: return float(v)/100 if "winrate" in k and float(v)>1 else float(v)
    except (TypeError,ValueError): pass
  return 0.0
-def wallet(t): return str(t.get("maker") or t.get("wallet") or "")
-def mint(t): return str(t.get("base_address") or t.get("token_address") or "")
+import re
+# Everything the feed returns is untrusted: it reaches the database and from there the
+# Mini App. Solana addresses are base58, 32-44 chars — anything else is rejected at the
+# boundary rather than stored and rendered later.
+_ADDR_RE=re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+def valid_address(a):
+ return bool(a) and bool(_ADDR_RE.match(a))
+def _addr(t,*keys):
+ for k in keys:
+  v=t.get(k)
+  if v is None: continue
+  v=str(v)
+  if valid_address(v): return v
+  if v: LOG.debug("rejected malformed address %r from field %s",v[:64],k)
+ return ""
+def wallet(t): return _addr(t,"maker","wallet")
+def mint(t): return _addr(t,"base_address","token_address")
 def stamp(t): return int(n(t,"timestamp","trigger_at"))
 def quote(t): return str(t.get("side","")).lower()
 def wr(s): return n(s,"winrate","win_rate","pnl_stat.winrate")

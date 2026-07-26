@@ -106,8 +106,11 @@ const TG = window.Telegram?.WebApp;
 const fmtSol = v => (v>=0?"":"-") + Math.abs(v).toFixed(5);
 const pct = v => (v>=0?"+":"") + v.toFixed(2) + "%";
 const cls = v => v > 0 ? "up" : v < 0 ? "down" : "";
-const short = m => m.slice(0,4) + "…" + m.slice(-4);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+// Mints, wallet addresses and chain names all originate from the GMGN API, so they are
+// untrusted text that reaches this page through the database. Escaping lives inside
+// short() rather than at each call site, so a new usage cannot forget it.
+const short = m => { const s = String(m); return esc(s.length > 10 ? s.slice(0,4) + "…" + s.slice(-4) : s); };
 
 function ago(sec){
   if (sec < 60) return sec + "с";
@@ -246,7 +249,7 @@ function positionCard(p){
     <div class="card-h">
       <div>
         <div class="mint">${short(p.mint)}</div>
-        <div class="sub">${p.chain} · ${ago(p.age_seconds)} в позиции · ${p.wallets} кош.</div>
+        <div class="sub">${esc(p.chain)} · ${ago(p.age_seconds)} в позиции · ${p.wallets} кош.</div>
       </div>
       <div style="text-align:right">
         <div class="big ${c}">${pct(p.change_pct)}</div>
@@ -296,7 +299,7 @@ function viewOverview(){
       <div class="row"><span class="sub">Жёсткий стоп</span><b class="num">−${cfg.hard_stop_pct}%</b></div>
       <div class="row"><span class="sub">Трейлинг</span><b class="num">от +${cfg.trailing_activate_pct}%, шаг ${cfg.trailing_distance_pct}%</b></div>
       <div class="row"><span class="sub">Макс. удержание</span><b class="num">${cfg.max_hold_hours}ч</b></div>
-      <div class="row"><span class="sub">Опрос / сети</span><b class="num">${cfg.poll_seconds}с · ${cfg.chains.join(", ")}</b></div>
+      <div class="row"><span class="sub">Опрос / сети</span><b class="num">${cfg.poll_seconds}с · ${esc(cfg.chains.join(", "))}</b></div>
     </div>`;
 }
 
