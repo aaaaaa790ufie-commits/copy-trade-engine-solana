@@ -19,6 +19,15 @@ def _find_gmgn():
     return "gmgn-cli.cmd" if os.name=="nt" else "gmgn-cli"
 _GMGN=_find_gmgn()
 CLI_TIMEOUT=config.get_int("GMGN_CLI_TIMEOUT",45)
+def cli_available():
+ """Whether the resolved gmgn-cli path is actually something we can run.
+
+ _find_gmgn's last resort is a bare name, so a missing install shows up only when
+ Popen raises. cycle() catches that per chain and logs "[WinError 2]" — a Windows
+ error number, once per poll, forever. Meanwhile the heartbeat still ticks, so the
+ panel and /status both read LIVE, and nothing reaches Telegram at all.
+ """
+ return bool(shutil.which(_GMGN)) or os.path.isfile(_GMGN)
 def gmgn_cli(args,timeout=None):
  """Run gmgn-cli with the repo-local credentials and return its parsed JSON.
 
@@ -315,6 +324,8 @@ def cooling(c,m,chain,now):
 # loop runs every POLL seconds and would otherwise flood Telegram.
 STUCK_AFTER=config.get_int("GMGN_STUCK_AFTER_SECONDS",MAX_HOLD*2)
 STUCK_REMIND=config.get_int("GMGN_STUCK_REMIND_SECONDS",21600)
+# How often a failing feed is re-announced. One per poll would be 240 messages an hour.
+FEED_FAIL_REMIND=config.get_int("GMGN_FEED_FAIL_REMIND_SECONDS",900)
 def throttled(c,key,now,interval):
  """True at most once per `interval` for this key. Used to rate-limit repeat alerts."""
  row=c.execute("SELECT updated_at FROM engine_state WHERE key=?",(key,)).fetchone()
@@ -656,6 +667,12 @@ def cycle(c):
    got_feed=got_feed or bool(trades)
   except Exception as e:
    LOG.warning("feed %s: %s",chain,e); trades=[]
+   # Journalled, not just logged, so a feed that never works reaches Telegram and the
+   # panel's event list rather than only a console nobody is watching. Throttled,
+   # because the alternative is one message per poll.
+   if throttled(c,f"feed_fail_{chain}",now,FEED_FAIL_REMIND):
+    hint="" if cli_available() else " — gmgn-cli не найден, установите: npm install -g gmgn-cli"
+    emit(c,"ERROR",f"фид {chain} не отвечает: {type(e).__name__}: {e}{hint}")
   # 2. Stops before anything else. Nothing slow may run ahead of this.
   exits(c,chain,trades,now); c.commit()
   if not trades: continue

@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse, logging, os, sqlite3, time
 from pathlib import Path
 import config
-from paper_engine import DB, POLL, cycle, init, emit, is_blacklisted, run_forever, valid_address, LOG
+from paper_engine import DB, POLL, cli_available, cycle, init, emit, is_blacklisted, run_forever, valid_address, LOG
 
 SEEDS_PATH = Path(config.get("SEED_WALLETS_SOL", str(Path(__file__).resolve().parent.parent / "data" / "seed_wallets_sol.txt")))
 
@@ -81,6 +81,16 @@ def main():
     args = ap.parse_args()
     config.use_utf8_stdio()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    # Checked before anything else, because the failure is otherwise invisible: the
+    # heartbeat still ticks, so /status and the panel both report LIVE, while every
+    # poll logs a bare "[WinError 2]" and nothing ever happens. Saying so once and
+    # exiting is far more use than running indefinitely in that state.
+    if not cli_available():
+        raise SystemExit(
+            "gmgn-cli was not found — the engine cannot read anything without it.\n"
+            "  npm install -g gmgn-cli\n"
+            "Then check it resolves: gmgn-cli --version"
+        )
     c = sqlite3.connect(args.db_path, timeout=30)
     init(c)
     import_seed_wallets(c)

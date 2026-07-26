@@ -1234,6 +1234,56 @@ class AccountingInvariantTests(unittest.TestCase):
         self._assert_invariants(c, "replayed signal")
 
 
+class FeedFailureTests(unittest.TestCase):
+    """A feed that never answers must be visible somewhere other than the console.
+
+    The heartbeat ticks whether or not the feed works, so /status and the panel both
+    read LIVE. With gmgn-cli missing, the only signal was `[WinError 2]` logged once per
+    poll — a Windows error number, to a console nobody is watching, forever.
+    """
+
+    def setUp(self):
+        self._gmgn = pe._GMGN
+        self.addCleanup(lambda: setattr(pe, "_GMGN", self._gmgn))
+
+    def test_a_dead_feed_is_journalled_not_only_logged(self):
+        pe._GMGN = "gmgn-cli-not-installed.cmd"
+        c = fresh_db()
+        with self.assertLogs("paper-engine", level="WARNING"):
+            pe.cycle(c)
+        rows = c.execute("SELECT message FROM engine_events WHERE kind='ERROR'").fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertIn("npm install -g gmgn-cli", rows[0][0],
+                      "the message should say what to actually do about it")
+
+    def test_it_does_not_send_one_message_per_poll(self):
+        pe._GMGN = "gmgn-cli-not-installed.cmd"
+        c = fresh_db()
+        with self.assertLogs("paper-engine", level="WARNING"):
+            for i in range(6):
+                pe.cycle(c)
+        self.assertEqual(
+            c.execute("SELECT COUNT(*) FROM engine_events WHERE kind='ERROR'").fetchone()[0], 1)
+
+    def test_the_hint_is_omitted_when_the_cli_is_present(self):
+        # A transient API failure is not a missing install, and saying so would be wrong.
+        self.assertTrue(pe.cli_available(), "the real CLI should resolve in this environment")
+        saved = pe.cli
+        pe.cli = lambda args: (_ for _ in ()).throw(RuntimeError("502 upstream"))
+        self.addCleanup(lambda: setattr(pe, "cli", saved))
+        c = fresh_db()
+        with self.assertLogs("paper-engine", level="WARNING"):
+            pe.cycle(c)
+        msg = c.execute("SELECT message FROM engine_events WHERE kind='ERROR'").fetchone()[0]
+        self.assertIn("502 upstream", msg)
+        self.assertNotIn("npm install", msg)
+
+    def test_cli_available_reflects_reality(self):
+        self.assertTrue(pe.cli_available())
+        pe._GMGN = "definitely-not-on-this-machine.cmd"
+        self.assertFalse(pe.cli_available())
+
+
 class SolvencyTests(unittest.TestCase):
     """Running out of money has to be announced whether or not a signal fires.
 
