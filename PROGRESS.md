@@ -1163,3 +1163,59 @@ the label fails on the threshold string. Working tree confirmed clean after each
 - **The panel after several regex edits**: all six tabs render with no JavaScript
   errors, the extracted script passes `node --check`, braces balance, and no function
   is defined without being referenced.
+
+## Pass 16 — 2026-07-26
+
+Lens: the contract between `enter()` and its callers, then the panel's own duplication.
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 63 | Medium | `/wallets` printed the same count twice under different labels — it queried `SUM(winrate>=ELITE_WINRATE)` and `SUM(winrate>=WEIGHT_TIERS[0][0])`, both 0.90 since the ladder changed, beneath hardcoded "90%+" and "70%+". Live output read `90%+ 154 · 70%+ 154` | Uses `webapp.winrate_bands`, the same function the panel renders from | `6e00fc6` |
+| 64 | Low | The hero and the results card had separate helpers for "current, then lifetime in parentheses", with different signatures and different fallbacks | One `pair()` for the page | `7614377` |
+| 65 | Low | Three labels spelled thresholds out by hand | Read from `config.elite_winrate` | `7614377` |
+
+Verified: `enter()` returns a set on all five paths (no trades, below threshold, no price,
+no funds, success) and its single production caller uses it. Bands reconcile — they sum
+to 1188, exactly the active pool.
+
+## Pass 17 — 2026-07-26
+
+Lens: close the pattern named in Pass 16 rather than wait for its fourth instance, then
+re-examine claims made in earlier passes.
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 66 | Medium | `heartbeat()` is written even when every feed call failed, so `/status` reported LIVE while the engine fetched nothing and could neither enter nor price | `last_feed_ok` recorded separately; a third state, 🟡 НЕТ ДАННЫХ | `d442c1a` |
+| 67 | Medium | **A conclusion in `PROGRESS.md` was wrong.** It argued the trailing stop might be near-inert at a 1 h hold because one of twelve trades exited above +25% — but the stop arms on the *peak*, not the exit | Measured properly and corrected in both places it appeared | `44f5c2f` |
+| 68 | Medium | `ISSUES.md` described a state that no longer existed: an account "nearly out of runway" at 0.0311 SOL, and two already-taken decisions listed as open | Rewritten to what is true | `7f2b811` |
+| 69 | — | Preventive: a guard test forbidding any percentage literal in operator-facing text that equals a live threshold | `4e0aef3` |
+
+### The corrected measurement
+
+| Exit reason | Count | Holding times |
+|---|---:|---|
+| trailing stop 15% | 3 | 9, 25, 34 min |
+| hard stop −45% | 4 | 12, 436, 671, 671 min |
+| max hold | 4 | 379, 428, 524, 834 min |
+
+The trailing stop produced **every profitable exit** (+18.39%, +18.74%, +31.48%), all
+closing within 34 minutes — inside the new cap. The eight positions that lived past an
+hour lost −0.0747 SOL between them, including both −99.99% write-offs. The 1 h cap
+therefore cuts the losing cohort and leaves the winners untouched, which is the
+opposite of what the earlier note implied.
+
+### Verified against a real fault
+
+A DNS failure occurred mid-session. The engine logged
+`stats sol: Client network socket disconnected before secure TLS connection`, continued,
+and completed 40 cycles at a 6.4 s mean with zero crash restarts. The Pass 1 resilience
+work held under a genuine network fault rather than a simulated one — and finding 66
+came directly from asking what would have happened had the *feed* been the failing call.
+
+```
+$ python -m unittest discover -s gmgn -p 'test_*.py'
+Ran 191 tests in 10.729s
+OK
+```
+
+Neither pass was clean.
