@@ -1,4 +1,5 @@
 import os
+import pathlib
 import sqlite3
 import tempfile
 import time
@@ -722,6 +723,86 @@ class WebappPositionTests(unittest.TestCase):
         merged = self.webapp.merge_marks(["a"], {"a": 5.0}, {})
         merged = self.webapp.merge_marks(["a"], {}, merged)  # API failed this pass
         self.assertEqual(merged["a"], 5.0, "one bad poll must not blank the position")
+
+
+class BotPushTests(unittest.TestCase):
+    """Events must not be dropped by a restart, nor replayed in full after an outage."""
+
+    def setUp(self):
+        import telegram_bot as bot
+        self.bot = bot
+        self.sent = []
+        self._api, self._state = bot.api, bot.STATE_PATH
+        bot.api = lambda method, data=None: self.sent.append(data) or {"ok": True}
+        fd, self.state_file = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        os.unlink(self.state_file)  # start with no cursor on disk
+        bot.STATE_PATH = pathlib.Path(self.state_file)
+        bot._last_event = 0
+
+    def tearDown(self):
+        self.bot.api, self.bot.STATE_PATH = self._api, self._state
+        self.bot._last_event = 0
+        if os.path.exists(self.state_file):
+            os.unlink(self.state_file)
+
+    def _events(self, c, n, kind="EXIT"):
+        for i in range(n):
+            c.execute("INSERT INTO engine_events VALUES(NULL,?,?,?)", (NOW, kind, f"event {i}"))
+
+    def test_first_run_does_not_replay_the_journal(self):
+        c = fresh_db()
+        self._events(c, 5)
+        self.bot.catch_up(c)
+        self.bot.push_events(c)
+        self.assertEqual(self.sent, [], "a first start must not dump the whole history")
+
+    def test_restart_delivers_events_missed_while_down(self):
+        c = fresh_db()
+        self.bot.catch_up(c)          # first start, cursor at 0 events
+        self._events(c, 3)            # engine works while the bot is down
+        self.bot._last_event = 0      # simulate the process restarting
+        self.bot.catch_up(c)          # cursor is reloaded from disk, not reset to MAX(id)
+        self.bot.push_events(c)
+        self.assertEqual(len(self.sent), 3, "a restart used to silently drop these")
+
+    def test_long_outage_is_summarised_not_replayed(self):
+        c = fresh_db()
+        self.bot.catch_up(c)
+        self._events(c, self.bot.CATCHUP_LIMIT + 10, kind="ENTRY")
+        self.bot._last_event = 0
+        self.bot.catch_up(c)
+        self.assertEqual(len(self.sent), 1, "a long outage sends one summary")
+        self.assertIn("Пропущено", self.sent[0]["text"])
+        self.sent.clear()
+        self.bot.push_events(c)
+        self.assertEqual(self.sent, [], "and the backlog is not then replayed as well")
+
+    def test_failed_send_is_retried_not_skipped(self):
+        c = fresh_db()
+        self.bot.catch_up(c)
+        self._events(c, 2)
+        calls = []
+
+        def flaky(method, data=None):
+            calls.append(data)
+            if len(calls) == 1:
+                raise RuntimeError("telegram down")
+            return {"ok": True}
+
+        self.bot.api = flaky
+        self.bot.push_events(c)                      # first send fails
+        self.assertEqual(self.bot._last_event, 0, "the cursor must not advance past it")
+        self.bot.push_events(c)                      # retry delivers both
+        self.assertEqual(len(calls), 3)
+
+    def test_non_pushable_kinds_advance_the_cursor(self):
+        c = fresh_db()
+        self.bot.catch_up(c)
+        c.execute("INSERT INTO engine_events VALUES(NULL,?,?,?)", (NOW, "DEBUG", "internal"))
+        self.bot.push_events(c)
+        self.assertEqual(self.sent, [])
+        self.assertGreater(self.bot._last_event, 0, "an unsent kind must not block the queue")
 
 
 class InitDataTests(unittest.TestCase):

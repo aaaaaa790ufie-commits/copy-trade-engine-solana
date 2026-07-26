@@ -83,25 +83,93 @@ def install_commands() -> None:
         LOG.warning("could not register commands: %s", e)
 
 
+ICONS = {"ENTRY": "🟢", "EXIT": "🔴", "WALLET": "👛", "WALLET_BUY": "⭐",
+         "BANKRUPT": "💀", "RECOVERY": "♻️", "ERROR": "⚠️", "STUCK": "🧊"}
+# Events per push pass. The loop runs once per getUpdates round-trip, so this only
+# throttles a burst; the remainder goes out on the next pass.
+PUSH_BATCH = config.get_int("TELEGRAM_PUSH_BATCH", 20)
+# Above this backlog the bot summarises instead of replaying every message, so a long
+# outage does not produce hundreds of notifications.
+CATCHUP_LIMIT = config.get_int("TELEGRAM_CATCHUP_LIMIT", 15)
+# The bot's read cursor. Kept beside the database rather than inside it, so the bot
+# needs no write access to the engine's data.
+STATE_PATH = Path(config.get("TELEGRAM_BOT_STATE", str(Path(config.DB_PATH).parent / "bot_state.json")))
+
 _last_event = 0
+
+
+def load_cursor() -> int | None:
+    """The persisted cursor, or None if there is no usable state file.
+
+    None and 0 are different: 0 is a legitimate cursor on a database whose journal is
+    still empty, and conflating them made every restart look like a first run.
+    """
+    try:
+        return int(json.loads(STATE_PATH.read_text(encoding="utf-8"))["last_event"])
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
+def save_cursor(eid: int) -> None:
+    try:
+        STATE_PATH.write_text(json.dumps({"last_event": eid}), encoding="utf-8")
+    except OSError as e:
+        LOG.warning("could not persist the event cursor to %s: %s", STATE_PATH, e)
+
+
+def catch_up(c: sqlite3.Connection) -> None:
+    """Report what happened while the bot was down, instead of dropping it.
+
+    The cursor used to be reset to MAX(id) on every start, so every event during a
+    restart was silently discarded — including BANKRUPT, ERROR and EXIT, the ones most
+    worth seeing. The supervisor now restarts the bot whenever the tunnel URL changes,
+    which made that routine rather than rare.
+    """
+    global _last_event
+    cursor = load_cursor()
+    if cursor is None:
+        # First ever run: start from now rather than replaying the whole journal.
+        _last_event = c.execute("SELECT COALESCE(MAX(id),0) FROM engine_events").fetchone()[0]
+        save_cursor(_last_event)
+        return
+    _last_event = cursor
+    rows = c.execute(
+        "SELECT kind,COUNT(*) FROM engine_events WHERE id>? AND kind IN (%s) GROUP BY kind"
+        % ",".join("?" * len(PUSH_KINDS)),
+        (_last_event, *PUSH_KINDS),
+    ).fetchall()
+    missed = sum(n for _, n in rows)
+    if missed > CATCHUP_LIMIT:
+        summary = ", ".join(f"{ICONS.get(k, '•')} {k}×{n}" for k, n in sorted(rows, key=lambda r: -r[1]))
+        try:
+            api("sendMessage", {"chat_id": CHAT, "text": f"⏳ Пропущено за время простоя: {missed}\n{summary}"})
+        except Exception as e:
+            LOG.warning("catch-up summary failed: %s", e)
+        _last_event = c.execute("SELECT COALESCE(MAX(id),0) FROM engine_events").fetchone()[0]
+        save_cursor(_last_event)
+    elif missed:
+        LOG.info("replaying %d missed events", missed)
 
 
 def push_events(c: sqlite3.Connection) -> None:
     global _last_event
     rows = c.execute(
-        "SELECT id,kind,message FROM engine_events WHERE id>? ORDER BY id LIMIT 20", (_last_event,)
+        "SELECT id,kind,message FROM engine_events WHERE id>? ORDER BY id LIMIT ?",
+        (_last_event, PUSH_BATCH),
     ).fetchall()
     for eid, kind, msg in rows:
+        if kind in PUSH_KINDS:
+            try:
+                api("sendMessage", {"chat_id": CHAT, "text": f"{ICONS.get(kind, '•')} {kind}: {msg}"})
+                time.sleep(0.35)
+            except Exception as e:
+                # Leave the cursor where it is so the event is retried, rather than
+                # advancing past an event that was never delivered.
+                LOG.warning("push failed, will retry: %s", e)
+                return
         _last_event = eid
-        if kind not in PUSH_KINDS:
-            continue
-        icon = {"ENTRY": "🟢", "EXIT": "🔴", "WALLET": "👛", "WALLET_BUY": "⭐",
-                "BANKRUPT": "💀", "RECOVERY": "♻️", "ERROR": "⚠️", "STUCK": "🧊"}.get(kind, "•")
-        try:
-            api("sendMessage", {"chat_id": CHAT, "text": f"{icon} {kind}: {msg}"})
-            time.sleep(0.35)
-        except Exception as e:
-            LOG.warning("push failed: %s", e)
+    if rows:
+        save_cursor(_last_event)
 
 
 # --------------------------------------------------------------------------
@@ -112,6 +180,20 @@ def _fmt_price(p: float) -> str:
     if not p:
         return "—"
     return f"{p:.3e}" if p < 1e-3 else f"{p:.6g}"
+
+
+def reply(c: sqlite3.Connection, command: str) -> str:
+    """text(), but a database that is missing or half-built answers instead of hanging.
+
+    On a fresh install the bot can start before the engine has ever created its tables;
+    an unhandled OperationalError there escapes to the poll loop, which logs and sleeps,
+    so the user sees nothing at all.
+    """
+    try:
+        return text(c, command)
+    except sqlite3.OperationalError as e:
+        LOG.warning("query failed for %s: %s", command, e)
+        return f"База ещё не готова ({e}). Запусти движок: python gmgn/run_engine.py"
 
 
 def text(c: sqlite3.Connection, command: str) -> str:
@@ -236,8 +318,13 @@ def main():
     if not CHAT:
         raise SystemExit("TELEGRAM_CHAT_ID is required — the bot must answer only its owner chat")
 
-    c = sqlite3.connect(DB, check_same_thread=False, timeout=30)
-    _last_event = c.execute("SELECT COALESCE(MAX(id),0) FROM engine_events").fetchone()[0]
+    if not Path(DB).is_file():
+        raise SystemExit(f"database not found at {DB} — start the engine first (python gmgn/run_engine.py)")
+    # Read-only: the bot reports, it never writes to the engine's data. A plain
+    # connect() would also create an empty database if the path were wrong, turning a
+    # typo into a bot that starts cleanly and then fails every query.
+    c = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, check_same_thread=False, timeout=30)
+    catch_up(c)
     install_commands()
     install_menu_button()
     LOG.info("bot polling; pushing events to chat %s", CHAT)
@@ -252,7 +339,7 @@ def main():
                 parts = (msg.get("text") or "").split()
                 if not parts or chat != CHAT:
                     continue
-                api("sendMessage", {"chat_id": chat, "text": text(c, parts[0].split("@")[0]),
+                api("sendMessage", {"chat_id": chat, "text": reply(c, parts[0].split("@")[0]),
                                     "reply_markup": keyboard()})
         except Exception as e:
             if "409" in str(e):

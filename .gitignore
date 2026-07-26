@@ -41,3 +41,6 @@ logs/
 
 # --- Sentinel secrets (WARP/WireGuard keys) ---
 sentinel-secrets/
+
+# Telegram bot read cursor (local runtime state)
+bot_state.json
