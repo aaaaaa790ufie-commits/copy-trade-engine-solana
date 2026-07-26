@@ -468,3 +468,63 @@ until its own GC runs, which is why revocation was the fix that mattered.
 pass — it found seven issues, three of them reachable from outside the machine. The
 stopping condition is two consecutive passes with nothing new worth fixing, so at
 minimum Pass 4 and Pass 5 remain.
+
+## Pass 4 — 2026-07-26
+
+Re-read with fresh eyes: `supervisor.py`, `tunnel.py`, `config.py`, `paper_engine.py`
+(stats and refresh paths), `webapp.py` (auth configuration).
+
+### Found and fixed
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 41 | High | `_parse_env_file` read one physical line per assignment, so the PEM-format `GMGN_PRIVATE_KEY` was truncated to `"-----BEGIN PRIVATE KEY-----`. `--import-gmgn` copied that truncation into the project `.env`, where it looked like a credential. The real key is 118 chars over three lines; the project held 28 | Quoted values may span lines; `_drop_keys` removes continuation lines with their key; `.env` re-imported and verified byte-identical | `ee4cfd8` |
+| 42 | High | Two tunnel bugs cancelling out: a failed probe left the dead hostname in `tunnel.url`, and `main()` gated `watch()` on `tunnel.url` being set. Reconnection only ran because the field held a lie — fixing either alone would have left the Mini App local-only with nothing retrying | Failed probe clears the URL; `watch()` runs whenever a tunnel was requested | `2edf8d3` |
+| 43 | Medium | Auth defaulted on only for a public URL. Binding to `0.0.0.0` exposes the same data to the LAN and defaulted auth off | Auth follows reachability; `serve()` refuses an unauthenticated non-loopback bind unless set explicitly | `2edf8d3` |
+| 44 | Medium | `refresh_wallet_stats` matched neither branch when the API answered without a usable win rate, so `updated_at` never moved and the row sat at the head of the `ORDER BY updated_at` queue forever | Moves to the back, inventing nothing | `ee4cfd8` |
+| 45 | Medium | `get_stats` trusted the address key in a response, which `learn_new_makers` inserts directly | Validated | `ee4cfd8` |
+| 46 | Low | `config.apply_to_environ`, `config.gmgn_credentials_present`, `paper_engine.BUDGET` had no callers | Removed | `ee4cfd8` |
+| 47 | Low | `summary()` masked a hand-written list of three keys, so a newly added credential could print in full | Masking driven by `is_secret()` | `ee4cfd8` |
+| 48 | Low | `Child.stop()` and `Tunnel.stop()` called `kill()` without reaping | `wait()` after `kill()` | `2edf8d3` |
+
+### Verification
+
+```
+$ python -m unittest test_paper_engine
+Ran 121 tests in 9.225s
+OK
+```
+
+The credential corruption (#41) was found by reading `config.py`'s own masked output
+— `"---...(28 chars)` — not by reading the parser. A leading quote inside a value and
+a 28-character private key are both impossible. After the fix the project `.env`
+round-trips byte-identically against the machine-wide source, the Telegram token and
+API key are untouched, a live feed call still succeeds, and `gmgn_env()` carries the
+full 118-character key.
+
+Nothing observable had broken: every endpoint this engine uses is read-only, and the
+README states the runtime never needs a private key. It was a corrupt credential
+sitting in the file looking valid — which is the kind of thing that fails much later,
+somewhere else.
+
+The paired tunnel bugs (#42) were verified on a live run where the first URL failed:
+
+```
+WARN  https://drrap-...free.pinggy.net never served a request
+      ([SSL: DECRYPTION_FAILED_OR_BAD_RECORD_MAC]) — treating as failed
+WARN  tunnel unavailable — the Mini App stays local-only
+WARN  tunnel dropped — reconnecting
+INFO  Mini App published at https://lcque-...free.pinggy.net
+```
+
+The bind guard (#43) was checked directly: `--host 0.0.0.0` without auth exits with
+`refusing to serve on 0.0.0.0 without authentication`, while loopback is unaffected.
+
+### Still open
+
+`ISSUES.md` unchanged.
+
+**Confidence that `gmgn/` is production-ready: high.** Pass 4 was **not** clean — eight
+findings, two of them high severity, and one was a bug in code written during this
+work rather than inherited. That is the argument for the stopping condition: four
+passes in, a fresh read still turns up a corrupt credential. Pass 5 remains.
