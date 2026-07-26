@@ -178,6 +178,20 @@ def push_events(c: sqlite3.Connection) -> None:
 # Commands
 # --------------------------------------------------------------------------
 
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    """Russian count agreement: 1 сделку, 2 сделки, 5 сделок."""
+    tens, ones = n % 100, n % 10
+    if 11 <= tens <= 14:
+        word = many
+    elif ones == 1:
+        word = one
+    elif 2 <= ones <= 4:
+        word = few
+    else:
+        word = many
+    return f"{n} {word}"
+
+
 def _fmt_price(p: float) -> str:
     if not p:
         return "—"
@@ -219,10 +233,17 @@ def text(c: sqlite3.Connection, command: str) -> str:
         alive = pe.engine_is_alive(last_cycle)
         out = [
             f"{'💀 БАНКРОТ' if bankrupt else '🟢 LIVE' if alive else '🔴 ДВИЖОК СТОИТ'}",
-            f"Баланс: {balance:.5f} SOL  (старт {initial:.5f})",
-            f"Реализовано: {realized:+.5f} SOL",
-            f"Открыто позиций: {len(pos)}",
+            f"Баланс: {balance:.5f} SOL  (вложено {initial:.5f})",
+            f"Реализовано всего: {realized:+.5f} SOL",
         ]
+        # Lifetime P&L still carries whatever the previous configuration did, so report
+        # the current settings separately once the account has been reset.
+        reset_at = pe.reset_ts(c)
+        if reset_at:
+            since_pnl, since_n = pe.realised_since(c, reset_at)
+            age_h = (int(time.time()) - reset_at) / 3600
+            out.append(f"С текущих настроек ({age_h:.1f} ч): {since_pnl:+.5f} SOL за {_plural(since_n, 'сделку', 'сделки', 'сделок')}")
+        out.append(f"Открыто позиций: {len(pos)}")
         if age is not None:
             out.append(f"Последний цикл: {age} с назад")
         for m, chain, stake, entry, peak, opened, score in pos:

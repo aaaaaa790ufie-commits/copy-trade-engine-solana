@@ -424,6 +424,23 @@ def engine_is_alive(last_cycle_ts,now=None):
     return (now or time.time()) - last_cycle_ts < max(ALIVE_GRACE, POLL * 6)
 def heartbeat(c,now,detail=""):
  c.execute("INSERT INTO engine_state(key,value,updated_at) VALUES('last_cycle',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(detail or str(now),now))
+def reset_ts(c):
+ """When the account was last settled and topped up, or 0. Written by reset_account.py.
+
+ Lets the panel and /status separate performance under the current settings from
+ lifetime P&L, which still carries whatever the previous configuration did."""
+ try:
+  row=c.execute("SELECT value FROM engine_state WHERE key='reset_at'").fetchone()
+  return int(row[0]) if row and str(row[0]).isdigit() else 0
+ except sqlite3.OperationalError: return 0
+def realised_since(c,ts):
+ """Realised P&L from exits strictly after `ts`, and how many trades that covers.
+
+ Strictly after, not at: reset_account.py settles the previous configuration's open
+ positions with event_ts == reset_at, and counting those would charge the old
+ strategy's loss to the new one on its first reading."""
+ row=c.execute("SELECT COALESCE(SUM(pnl_sol),0),COUNT(*) FROM paper_trades WHERE action='EXIT' AND event_ts>?",(ts,)).fetchone()
+ return (row[0] or 0.0),(row[1] or 0)
 def last_cycle_ts(c):
  """Unix ts of the last completed cycle, 0 if the engine has never run.
 

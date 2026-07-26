@@ -447,6 +447,55 @@ class AttributionTests(unittest.TestCase):
         self.assertEqual(pe.wallet_attribution(fresh_db()), [])
 
 
+class ResetBoundaryTests(unittest.TestCase):
+    """Performance under the current settings must not inherit the previous one's loss."""
+
+    def _exit(self, c, ts, pnl):
+        c.execute("INSERT INTO paper_trades(token_mint,chain,action,price,stake_sol,pnl_sol,"
+                  "pnl_pct,reason,wallet_count,signal_score,event_ts) "
+                  "VALUES(?,'sol','EXIT',1.0,0.025,?,0,'t',1,1.0,?)", (MINT_A, pnl, ts))
+
+    def test_the_settlement_at_reset_is_not_counted_as_a_new_trade(self):
+        # reset_account.py closes the old configuration's positions with
+        # event_ts == reset_at. Counting those charged the old strategy's loss to the
+        # new one the moment it started.
+        c = fresh_db()
+        self._exit(c, NOW - 100, -0.02)   # before the reset
+        self._exit(c, NOW, -0.008)        # the settlement itself
+        self._exit(c, NOW + 60, +0.01)    # genuinely under the new settings
+
+        pnl, count = pe.realised_since(c, NOW)
+        self.assertEqual(count, 1)
+        self.assertAlmostEqual(pnl, 0.01)
+
+    def test_no_reset_recorded_reads_as_zero(self):
+        self.assertEqual(pe.reset_ts(fresh_db()), 0)
+
+    def test_reset_timestamp_round_trips(self):
+        c = fresh_db()
+        c.execute("INSERT INTO engine_state(key,value,updated_at) VALUES('reset_at',?,?)",
+                  (str(NOW), NOW))
+        self.assertEqual(pe.reset_ts(c), NOW)
+
+    def test_a_non_numeric_reset_marker_is_ignored(self):
+        c = fresh_db()
+        c.execute("INSERT INTO engine_state(key,value,updated_at) VALUES('reset_at','junk',?)", (NOW,))
+        self.assertEqual(pe.reset_ts(c), 0)
+
+
+class RussianPluralTests(unittest.TestCase):
+    """Counts appear in operator-facing text, so they have to agree grammatically."""
+
+    def test_agreement(self):
+        import telegram_bot as bot
+        cases = {0: "сделок", 1: "сделку", 2: "сделки", 4: "сделки", 5: "сделок",
+                 11: "сделок", 12: "сделок", 14: "сделок", 21: "сделку", 22: "сделки",
+                 25: "сделок", 101: "сделку", 111: "сделок"}
+        for n, expected in cases.items():
+            with self.subTest(n=n):
+                self.assertEqual(bot._plural(n, "сделку", "сделки", "сделок"), f"{n} {expected}")
+
+
 class MissedSignalTests(unittest.TestCase):
     """A 90%+ wallet now enters by itself, so the notification reports the opposite.
 
