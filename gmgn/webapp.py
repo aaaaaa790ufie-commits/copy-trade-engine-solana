@@ -98,16 +98,30 @@ _prices_at: float = 0.0
 _prices_lock = threading.Lock()
 
 
+def merge_marks(open_mints: list[str], fresh: dict[str, float], previous: dict[str, float]) -> dict[str, float]:
+    """Marks for exactly the currently-open positions.
+
+    Rebuilt rather than accumulated, so the cache cannot grow to hold a mark for every
+    position ever opened. A mint the API failed on this pass keeps its previous mark
+    instead of blanking — `prices_age` tells the client how stale the set is.
+    """
+    return {m: fresh.get(m) or previous.get(m, 0.0) for m in open_mints}
+
+
 def _price_refresher(stop: threading.Event) -> None:
     """Keep marks for open positions warm so API responses stay fast."""
-    global _prices_at
+    global _prices, _prices_at
     import paper_engine as pe
 
     while not stop.is_set():
         try:
-            c = sqlite3.connect(config.DB_PATH, timeout=30)
-            rows = c.execute("SELECT token_mint,chain FROM paper_positions WHERE status='open'").fetchall()
-            c.close()
+            # Read-only, and closed on the failure path too: without the finally, a
+            # raising execute() leaked a connection on every pass of this loop.
+            c = db()
+            try:
+                rows = c.execute("SELECT token_mint,chain FROM paper_positions WHERE status='open'").fetchall()
+            finally:
+                c.close()
             fresh = {}
             for mint, chain in rows:
                 try:
@@ -117,8 +131,12 @@ def _price_refresher(stop: threading.Event) -> None:
                     p = 0.0
                 if p > 0:
                     fresh[mint] = p
+            merged = merge_marks([m for m, _ in rows], fresh, _prices)
             with _prices_lock:
-                _prices.update(fresh)
+                # Rebind rather than clear-then-update: the latter leaves a window in
+                # which a reader holding the lock sees an empty dict and every position
+                # blinks to "unpriced".
+                _prices = merged
                 _prices_at = time.time()
         except Exception as e:
             LOG.warning("price refresher: %s", e)
@@ -146,7 +164,12 @@ def _positions(c: sqlite3.Connection) -> list[dict]:
         "SELECT token_mint,chain,entry_price,peak_price,stake_sol,opened_at,signal_score,wallet_count "
         "FROM paper_positions WHERE status='open' ORDER BY opened_at DESC"
     ):
-        current = mark_price(r["token_mint"]) or r["peak_price"]
+        # Without a live mark the position is shown at cost, not at peak_price. peak is the
+        # best price ever seen, so falling back to it reported the most flattering possible
+        # P&L for exactly the positions we know least about — a rugged token would have
+        # displayed ~0% while actually being near -100%. `priced` tells the UI to mark it.
+        mark = mark_price(r["token_mint"])
+        current = mark or r["entry_price"]
         change = (current / r["entry_price"] - 1) if r["entry_price"] else 0.0
         peak = max(r["peak_price"], current)
         peak_gain = (peak / r["entry_price"] - 1) if r["entry_price"] else 0.0
@@ -165,7 +188,7 @@ def _positions(c: sqlite3.Connection) -> list[dict]:
                 peak * (1 - config.TRAILING_DISTANCE_PCT / 100) if trail_armed else 0.0,
             ),
             "expires_in": max(0, config.MAX_HOLD_SECONDS - (int(time.time()) - r["opened_at"])),
-            "priced": mark_price(r["token_mint"]) > 0,
+            "priced": mark > 0,
         })
     return out
 

@@ -4,6 +4,7 @@ import tempfile
 import time
 import unittest
 
+import config
 import paper_engine as pe
 from paper_engine import allowed, cleanup_wallets, enter, exits, init, weight
 
@@ -654,6 +655,73 @@ class ResilienceTests(unittest.TestCase):
         pe.cycle = interrupted
         with self.assertRaises(KeyboardInterrupt):
             pe.run_forever(c)
+
+
+class WebappPositionTests(unittest.TestCase):
+    """What the panel reports about an open position must not flatter it."""
+
+    def setUp(self):
+        import webapp
+        self.webapp = webapp
+        webapp._prices.clear()
+
+    def tearDown(self):
+        self.webapp._prices.clear()
+
+    def _open(self, c, mint, entry, peak):
+        c.execute("INSERT INTO paper_positions VALUES(?,'sol',?,?,0.025,?,1.0,4,'open')",
+                  (mint, entry, peak, NOW))
+        # _positions() reads columns by name; webapp.db() sets this in production.
+        c.row_factory = sqlite3.Row
+
+    def test_unpriced_position_is_valued_at_cost_not_at_peak(self):
+        # Regression: the fallback was peak_price, the best price ever seen, so a token
+        # that had run to 3x and then rugged displayed +200% for as long as it stayed
+        # unquotable — the most flattering number for the position we know least about.
+        c = fresh_db()
+        self._open(c, MINT_A, entry=1.0, peak=3.0)
+        positions = self.webapp._positions(c)
+
+        self.assertEqual(len(positions), 1)
+        p = positions[0]
+        self.assertFalse(p["priced"])
+        self.assertEqual(p["current_price"], 1.0, "valued at cost")
+        self.assertEqual(p["change_pct"], 0.0)
+        self.assertEqual(p["pnl_sol"], 0.0)
+
+    def test_priced_position_reports_the_live_mark(self):
+        c = fresh_db()
+        self._open(c, MINT_A, entry=1.0, peak=1.0)
+        self.webapp._prices[MINT_A] = 1.5
+        p = self.webapp._positions(c)[0]
+
+        self.assertTrue(p["priced"])
+        self.assertAlmostEqual(p["change_pct"], 50.0)
+        self.assertAlmostEqual(p["pnl_sol"], 0.025 * 0.5)
+
+    def test_stop_price_reflects_whichever_stop_binds(self):
+        c = fresh_db()
+        self._open(c, MINT_A, entry=1.0, peak=2.0)   # +100% peak: trailing is armed
+        self.webapp._prices[MINT_A] = 2.0
+        p = self.webapp._positions(c)[0]
+
+        self.assertTrue(p["trailing_armed"])
+        self.assertAlmostEqual(p["stop_price"], 2.0 * (1 - config.TRAILING_DISTANCE_PCT / 100))
+
+    def test_marks_are_bounded_to_open_positions(self):
+        merged = self.webapp.merge_marks(["a", "b"], {"a": 1.0, "b": 2.0}, {})
+        self.assertEqual(merged, {"a": 1.0, "b": 2.0})
+
+        # "b" closed, "c" opened, "c" failed to price this pass.
+        merged = self.webapp.merge_marks(["a", "c"], {"a": 1.1}, merged)
+        self.assertEqual(set(merged), {"a", "c"}, "a closed position must not linger")
+        self.assertEqual(merged["a"], 1.1)
+        self.assertEqual(merged["c"], 0.0)
+
+    def test_failed_refresh_keeps_the_previous_mark(self):
+        merged = self.webapp.merge_marks(["a"], {"a": 5.0}, {})
+        merged = self.webapp.merge_marks(["a"], {}, merged)  # API failed this pass
+        self.assertEqual(merged["a"], 5.0, "one bad poll must not blank the position")
 
 
 class InitDataTests(unittest.TestCase):
