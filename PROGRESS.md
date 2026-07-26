@@ -915,3 +915,111 @@ OK
 ```
 
 **Clean.** One consecutive clean pass; one more is required.
+
+## Pass 14 — 2026-07-26 — **clean**
+
+Lens: a full lifecycle from an empty database, and a final documentation-vs-code check.
+
+### Nothing found worth fixing
+
+Drove a fresh database through the whole path rather than testing pieces:
+
+| Stage | Result |
+|---|---|
+| Cold start on an empty file | 10 tables created, opening balance 0.1 SOL |
+| Bot against a database the engine has never cycled | `/status`, `/positions`, `/weights` all answer with what to do next; nothing raises |
+| Entry, then a −60% move | Closed as `hard stop -45%` — the rule that fired, with the actual fill reported separately |
+| Restart | Nothing replayed on first start; an event raised afterwards was delivered |
+| Accounting | Money conserved: 0.085 = 0.1 − 0.015 |
+
+Documentation re-checked against the code: the weight table, the paper-only claim
+(`GMGN_PRIVATE_KEY` absent from `gmgn_env()`), the documented cycle order, and the
+stdlib-only claim all still hold. Working tree clean.
+
+```
+$ python -m unittest discover -s gmgn -p 'test_*.py'
+Ran 138 tests in 10.071s
+OK
+```
+
+---
+
+# Final summary — stopping condition met
+
+**Passes 13 and 14 both found nothing worth fixing.** Per the directive's stopping
+condition — two consecutive clean audit passes, cosmetic nitpicks excluded — the
+iterative hardening ends here.
+
+## What the fourteen passes cost and produced
+
+| | |
+|---|---|
+| Findings fixed | 58 |
+| Findings per pass | 21, 12, 7, 8, 1, 1, 1, 3, **0**, 1, 1, 2, **0**, **0** |
+| Tests | 19 → 138 |
+| Modules brought under test | `paper_engine`, `config`, `webapp`, `telegram_bot`, `tunnel`, `mass_discovery`, `monitor`, `run_engine` |
+
+The most expensive defects were found in the first two passes and were all in the same
+family — the engine could stop enforcing stop-losses while appearing to run:
+
+1. Stop checks ran *after* a stats sweep that could take tens of minutes (`cycle` ordering).
+2. Re-entering a token crashed the process, and the supervisor restarted into the same crash.
+3. Any transient error terminated the poll loop.
+4. A `ZeroDivisionError` on one bad row aborted the sweep for every later position.
+
+Two −99.99% exits against a −45% hard stop are what these produced in practice.
+
+## Honest accounting of what the passes caught
+
+Of the last eight high- and medium-severity findings, **five were regressions
+introduced by this hardening work**, not inherited bugs: the signing key handed to a
+paper engine, the dotenv parser truncating a PEM credential, the paired tunnel bugs
+that cancelled out, and two cases of a fix applied in one module and not propagated to
+the others sharing that rule.
+
+That pattern is the argument for the stopping condition being two passes rather than
+one. It also changed how fixes are now written: each rule that exists in more than one
+place ends with a test that **enumerates every implementation**, so a fifth address
+extractor or a fourth win-rate parser has to be added to that list to be trusted.
+
+## Verification standard used
+
+Claims here were checked against running code, not inferred:
+
+- Every accounting invariant was run against the live database.
+- New tests were validated by deliberately breaking the code and confirming they fail
+  — the exit payout, the launchpad filter, a documented default, and the stop level —
+  then reverting and confirming the tree clean against git.
+- The tunnel probe, the auth gate, path traversal, adversarial API input, failure
+  injection and 200 concurrent requests were all exercised against a running server.
+- The Mini App was loaded in a browser and read, not assumed from a 200 response.
+
+## Accepted limitations, deliberately left as-is
+
+Four items remain open in `ISSUES.md`. None is a defect in the code; each is a
+decision that belongs to the operator, and all were explicitly placed off-limits:
+
+1. **5563 blacklisted wallets**, an unknown share of them false positives from the
+   eligibility bug fixed in `a2d7e16`. `gmgn/unban_wallets.py` clears them after taking
+   a backup; it defaults to a dry run and **has not been run**. Not automatic because it
+   changes which wallets the engine will follow.
+2. **The strategy is unprofitable and nearly out of runway** — 0.0311 SOL equity of an
+   initial 0.1, free balance 0.0139 against a 0.025 stake. `GMGN_ENTRY_SCORE=0.25` is
+   exactly one 70% wallet, so "weighted convergence" currently means "follow one
+   wallet"; every entry so far fired on `wallets=1`. Not automatic because entry
+   threshold, stake, stop distances and the account balance are risk parameters. Worth
+   stating plainly: 11 closed trades cannot distinguish a bad strategy from an unlucky
+   one, and the remedy for that is more trades, not more tuning.
+3. **`engine_events` and `paper_trades` have no retention policy.** Harmless today;
+   deleting history is irreversible and the right window is a preference.
+4. **A delisted token locks its stake open forever.** The engine raises a `STUCK` alert
+   rather than guessing what such a position is worth, because writing it off books a
+   realised loss on an inference rather than an observed price.
+
+## Known-good state at the end
+
+Engine, Telegram bot and Mini App run under `gmgn/supervisor.py --tunnel`. Cycles
+complete in 5.5–9.4 s against a 15 s poll. The panel is published over HTTPS with
+Telegram `initData` verification pinned to the owner's chat; `/api/health` is the only
+unauthenticated endpoint, and it exists so the tunnel probe can confirm the URL serves
+before the bot is pointed at it.
