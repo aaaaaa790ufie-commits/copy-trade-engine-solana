@@ -401,3 +401,70 @@ realised, at `limit=300` and at `limit=2`, where it correctly reports `truncated
 high-severity bugs, two of them only visible by running against the live API rather
 than reading — which is why the stopping condition is two consecutive clean passes,
 not one. Pass 3 has not yet run.
+
+## Pass 3 — 2026-07-26
+
+Read end to end: `run_engine.py`, `webapp.py` (handler and routes), `telegram_bot.py`,
+`webapp/index.html`, plus a re-read of everything changed in Pass 2.
+
+### Found and fixed
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 34 | Medium | `import_old_wallets` skipped the blacklist check and ran on every start, so a wallet banned by `cleanup_wallets` returned from the legacy tables on the next restart, was re-queried and re-banned — a churn loop spending API calls on known-bad wallets, competing with the stop-loss path | One `_admit()` helper that rejects malformed addresses and skips banned ones | `28474bf` |
+| 35 | Medium | Neither startup import validated addresses, so anything in the legacy tables or seed file reached `wallet_watch` and the panel | `valid_address` on both paths, with a count of what was dropped | `28474bf` |
+| 36 | Medium | Static-file containment was a string prefix test: with a root of `.../gmgn/webapp`, a path resolving into `.../gmgn/webapp-anything` passed | `Path.is_relative_to` | `436812f` |
+| 37 | Medium | API errors returned `str(e)`, which can disclose filesystem paths over the public tunnel | Detail to the log, generic message to the client | `436812f` |
+| 38 | Medium | `reply()` caught only `OperationalError`. Anything else escaped to the poll loop — and since the update offset advances before the reply is sent, the command was lost and the user saw silence | All failures answer; one bad reply no longer abandons the updates behind it | `436812f` |
+| 39 | Low | `ThreadingHTTPServer` spawns a thread per connection uncapped, and a half-open connection pinned one forever | `Handler.timeout` | `436812f` |
+| 40 | Low | `SEEDS_PATH` read `os.getenv` directly, bypassing the repo `.env` | Routed through `config.get` | `28474bf` |
+
+### Verification
+
+```
+$ python -m unittest test_paper_engine
+Ran 109 tests in 5.018s
+OK
+```
+
+Path traversal checked against a running server rather than only in unit tests:
+
+| Request | Result |
+|---|---|
+| `/../config.py`, `/../../.env`, `/..%2f..%2f.env` | 404 |
+| `/C:/Windows/win.ini`, `/../webapp.py`, `/../../sentinel.db` | 404 |
+| `/`, `/index.html` | 200, page renders |
+
+Full stack launched with engine, bot and Mini App:
+
+- Bot token verified live via `getMe` → `@solrobinbot`.
+- Tunnel published; the probe again rejected one pinggy URL on TLS before accepting
+  the next, so the button was never pointed at a dead origin.
+- Menu button confirmed via `getChatMenuButton`: type `web_app`, pointing at the live
+  URL; all seven commands registered via `getMyCommands`.
+- Through the public origin: page 200, `/api/health` 200, `/api/overview` 401,
+  forged `initData` 401.
+- The 401 auth wall rendered in a real browser rather than leaving a loading skeleton.
+
+A claim from Pass 2 worth correcting: the 4.2 MB `sentinel.db-wal` noted at session
+start is not a leak. It is now 766 KB with the same processes running, so WAL
+checkpointing works and no fix was needed. No change was made for it.
+
+### Leaked credential — closed out
+
+The bot token committed in `CLAUDE.md` was revoked by the operator, and history has
+now been rewritten with `git filter-branch` and force-pushed. Verified: no reachable
+commit on any of the six remote branches contains it; `refs/original`, the stale
+backup branches and the `pre-token-purge` tag were deleted and the objects garbage
+collected locally. 81 commits and 63 tracked files survive intact, and the 109 tests
+pass on the rewritten tree. GitHub can still serve an orphaned commit by direct SHA
+until its own GC runs, which is why revocation was the fix that mattered.
+
+### Still open
+
+`ISSUES.md` unchanged: four items, each needing an operator decision.
+
+**Confidence that `gmgn/` is production-ready: high.** But Pass 3 was **not** a clean
+pass — it found seven issues, three of them reachable from outside the machine. The
+stopping condition is two consecutive passes with nothing new worth fixing, so at
+minimum Pass 4 and Pass 5 remain.
