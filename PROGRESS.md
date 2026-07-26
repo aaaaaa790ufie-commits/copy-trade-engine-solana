@@ -1107,10 +1107,13 @@ distinguish a good strategy from a lucky one. What changes that is more trades, 
 more tuning. Items 1, 3 and 4 are unchanged, and `unban_wallets.py` still has not run.
 
 One consequence worth watching rather than pre-emptively changing: with a 1 h hold the
-trailing stop, which arms at +25%, has far less time to arm than it did over 6 h. Of
-the 12 trades so far exactly one exceeded +25%. If that stays true the trailing stop is
-close to inert and the hard stop plus the hour does the work — worth revisiting once
-there are enough trades to say.
+trailing stop, which arms at +25%, has less time to arm than it did over 6 h.
+
+**Corrected in Pass 17.** The sentence that stood here counted trades whose *exit* P&L
+exceeded +25% and concluded the trailing stop was close to inert. That was the wrong
+measurement — the trailing stop arms on the peak, not the exit. It fired 3 times in 12,
+producing every profitable exit, and all three closed within 34 minutes. See ISSUES.md
+item 2 for the full breakdown.
 
 ---
 

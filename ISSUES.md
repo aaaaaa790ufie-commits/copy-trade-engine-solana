@@ -70,6 +70,29 @@ wallet", with no convergence required at all — every entry so far was triggere
 **Not done automatically because** entry threshold, stake, stop distances and the
 account balance were explicitly placed off-limits without approval.
 
+### Update 2026-07-26: the 1 h cap is supported by the historical data
+
+An earlier note in `PROGRESS.md` suggested the trailing stop might be near-inert at a
+1 h hold, on the grounds that only one of twelve trades exited above +25%. **That
+reasoning was wrong** — it measured P&L at exit rather than the peak that arms the
+trailing stop. Measured properly:
+
+| Exit reason | Count | Holding times |
+|---|---:|---|
+| trailing stop 15% | 3 | 9, 25, 34 min |
+| hard stop −45% | 4 | 12, 436, 671, 671 min |
+| max hold | 4 | 379, 428, 524, 834 min |
+| strategy reset | 1 | 107 min |
+
+The trailing stop is not inert: it produced **every profitable exit** (+18.39%,
++18.74%, +31.48%), and all three closed within 34 minutes, comfortably inside the new
+cap. Meanwhile the eight positions that lived past an hour lost **−0.0747 SOL between
+them**, including both −99.99% write-offs.
+
+On this sample the 1 h auto-close cuts precisely the cohort that lost money and leaves
+the winners untouched. Eleven trades is still far too small to call it settled, but the
+direction of the evidence now points the same way as the change.
+
 ---
 
 ## 3. `engine_events` and `paper_trades` grow without bound
