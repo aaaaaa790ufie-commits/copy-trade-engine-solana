@@ -374,8 +374,16 @@ def engine_is_alive(last_cycle_ts,now=None):
 def heartbeat(c,now,detail=""):
  c.execute("INSERT INTO engine_state(key,value,updated_at) VALUES('last_cycle',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(detail or str(now),now))
 def last_cycle_ts(c):
- row=c.execute("SELECT updated_at FROM engine_state WHERE key='last_cycle'").fetchone()
- return row[0] if row else 0
+ """Unix ts of the last completed cycle, 0 if the engine has never run.
+
+ Falls back to the newest journal entry on a database created before engine_state
+ existed. Shared by the bot and the Mini App so all three read liveness the same way."""
+ try:
+  row=c.execute("SELECT updated_at FROM engine_state WHERE key='last_cycle'").fetchone()
+  if row: return row[0]
+ except sqlite3.OperationalError: pass
+ row=c.execute("SELECT MAX(event_ts) FROM engine_events").fetchone()
+ return (row[0] if row and row[0] else 0) or 0
 ELITE_WINRATE=config.get_float("GMGN_ELITE_WINRATE",0.90)
 ELITE_CALLOUTS_MAX=config.get_int("GMGN_ELITE_CALLOUTS_MAX",10)
 def elite_buy_callouts(c,chain,trades,now,since):

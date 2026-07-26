@@ -28,7 +28,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
 from paper_engine import _find_gmgn as pe_find_gmgn  # noqa: E402
-from paper_engine import _is_winrate_key, gmgn_cli  # noqa: E402
+from paper_engine import _is_winrate_key, gmgn_cli, valid_address  # noqa: E402
 
 LOG = logging.getLogger("gmgn-monitor")
 # Read through config.py so the repo-local .env applies here too, rather than requiring
@@ -122,13 +122,17 @@ def number(obj: dict[str, Any], *keys: str, default: float = 0.0) -> float:
 
 
 def wallet_address(row: dict[str, Any]) -> str:
-    return str(
-        row.get("wallet_address")
-        or row.get("address")
-        or row.get("maker")
-        or row.get("wallet")
-        or ""
-    )
+    """First well-formed address among the field names GMGN uses, else "".
+
+    Validated for the same reason paper_engine and mass_discovery validate: the result
+    is written to SQLite and read back by other components. This copy was missed when
+    the check was added in Pass 2 and accepted `<img src=x onerror=...>` verbatim.
+    """
+    for key in ("wallet_address", "address", "maker", "wallet"):
+        value = row.get(key)
+        if value is not None and valid_address(str(value)):
+            return str(value)
+    return ""
 
 
 def fetch_stats(wallets: list[str]) -> dict[str, dict[str, Any]]:

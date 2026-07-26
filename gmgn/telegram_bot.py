@@ -213,9 +213,9 @@ def text(c: sqlite3.Connection, command: str) -> str:
             "FROM paper_positions WHERE status='open' ORDER BY opened_at DESC"
         ).fetchall()
         realized = c.execute("SELECT COALESCE(SUM(pnl_sol),0) FROM paper_trades WHERE action='EXIT'").fetchone()[0]
-        hb = c.execute("SELECT updated_at FROM engine_state WHERE key='last_cycle'").fetchone()
-        age = int(time.time()) - hb[0] if hb else None
-        alive = pe.engine_is_alive(hb[0] if hb else 0)
+        last_cycle = pe.last_cycle_ts(c)
+        age = int(time.time()) - last_cycle if last_cycle else None
+        alive = pe.engine_is_alive(last_cycle)
         out = [
             f"{'💀 БАНКРОТ' if bankrupt else '🟢 LIVE' if alive else '🔴 ДВИЖОК СТОИТ'}",
             f"Баланс: {balance:.5f} SOL  (старт {initial:.5f})",

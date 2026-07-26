@@ -274,14 +274,7 @@ def api_overview() -> dict:
 
 def engine_heartbeat(c: sqlite3.Connection) -> int:
     """Unix ts of the engine's last completed cycle, or 0 if it has never run."""
-    try:
-        row = c.execute("SELECT updated_at FROM engine_state WHERE key='last_cycle'").fetchone()
-        if row:
-            return row[0]
-    except sqlite3.OperationalError:
-        pass  # pre-heartbeat database
-    row = c.execute("SELECT MAX(event_ts) FROM engine_events").fetchone()
-    return (row[0] if row and row[0] else 0) or 0
+    return pe.last_cycle_ts(c)
 
 
 def engine_alive(c: sqlite3.Connection) -> bool:

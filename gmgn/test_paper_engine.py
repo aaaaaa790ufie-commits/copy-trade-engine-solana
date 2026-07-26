@@ -301,6 +301,31 @@ class AddressValidationTests(unittest.TestCase):
         self.assertEqual(
             pe.mint({"base_address": "junk", "token_address": self.GOOD_MINT}), self.GOOD_MINT)
 
+    def test_every_module_that_extracts_an_address_validates_it(self):
+        """Four extractors, one rule. Enumerated so a fifth cannot quietly opt out.
+
+        monitor.wallet_address was missed when validation was added and accepted
+        `<img src=x onerror=...>` verbatim until Pass 12.
+        """
+        import mass_discovery as md
+        import monitor
+
+        payload = "<img src=x onerror=alert(1)>"
+        extractors = [
+            ("paper_engine.wallet", lambda p: pe.wallet(p)),
+            ("paper_engine.mint", lambda p: pe.mint({"base_address": p["address"]})),
+            ("mass_discovery.wallet_address", md.wallet_address),
+            ("monitor.wallet_address", monitor.wallet_address),
+        ]
+        for name, extract in extractors:
+            with self.subTest(name):
+                self.assertEqual(extract({"address": payload, "maker": payload,
+                                          "wallet_address": payload, "wallet": payload}), "",
+                                 f"{name} let a malformed address through")
+                good = {k: self.GOOD_WALLET for k in ("address", "maker", "wallet_address", "wallet")}
+                good["base_address"] = self.GOOD_WALLET
+                self.assertEqual(extract(good), self.GOOD_WALLET, f"{name} rejected a real address")
+
     def test_malformed_trades_never_reach_the_database(self):
         c = fresh_db()
         trades = [{"maker": "<script>", "base_address": "<img onerror=1>", "side": "buy",
