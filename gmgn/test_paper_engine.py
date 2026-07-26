@@ -1774,6 +1774,63 @@ class OperatorFacingLabelTests(unittest.TestCase):
             pe.TOP_WINRATE = saved
 
 
+class ResponseShapeTests(unittest.TestCase):
+    """GMGN answers in several shapes, and the hand-written unwrapping had a guard that
+    could never fire: `d.get("list") or (d if isinstance(d,list) else [])` raises on the
+    .get before the list fallback is reached. A guard that cannot run is worse than none,
+    because it reads as handled.
+    """
+
+    def test_every_shape_yields_rows(self):
+        for payload, expected, label in (
+            ({"list": [{"maker": "a"}]}, 1, "dict with list"),
+            ([{"maker": "a"}], 1, "bare list"),
+            ({"data": {"list": [{"maker": "a"}]}}, 1, "nested data.list"),
+            ({"data": {"rank": [{"address": "x"}]}}, 1, "trending data.rank"),
+        ):
+            with self.subTest(label):
+                self.assertEqual(len(pe.rows_under(payload, "rank")), expected)
+
+    def test_nothing_usable_is_empty_not_an_exception(self):
+        for payload, label in (({}, "empty dict"), ([], "empty list"), (None, "None"),
+                               ("nonsense", "a string"), (42, "a number"),
+                               ({"list": None}, "list key holding None")):
+            with self.subTest(label):
+                self.assertEqual(pe.rows_under(payload, "rank"), [])
+
+    def test_non_dict_entries_are_dropped(self):
+        self.assertEqual(pe.rows_under({"list": [{"a": 1}, "junk", None, 7]}), [{"a": 1}])
+
+    def test_discovery_validates_the_addresses_it_stores(self):
+        """token traders addresses went into wallet_watch unvalidated.
+
+        Every other address boundary checks base58; this one used a raw .get, so a
+        malformed value from the API would have been stored and later rendered.
+        """
+        saved = pe.cli
+        pe.cli = lambda args: (
+            {"list": [{"maker": "<script>alert(1)</script>"}, {"maker": WALLET_A}]}
+            if args[:2] == ["track", "kol"] else {})
+        try:
+            c = fresh_db()
+            pe.discover_wallets(c, "sol", NOW)
+        finally:
+            pe.cli = saved
+        stored = [r[0] for r in c.execute("SELECT address FROM wallet_watch")]
+        self.assertEqual(stored, [WALLET_A])
+
+    def test_a_list_response_no_longer_raises(self):
+        # The exact shape whose fallback was unreachable.
+        saved = pe.cli
+        pe.cli = lambda args: ([{"maker": WALLET_A}] if args[:2] == ["track", "kol"] else {})
+        try:
+            c = fresh_db()
+            pe.discover_wallets(c, "sol", NOW)
+        finally:
+            pe.cli = saved
+        self.assertEqual([r[0] for r in c.execute("SELECT address FROM wallet_watch")], [WALLET_A])
+
+
 class SignalReachTests(unittest.TestCase):
     """How close the engine has come to entering, so a quiet market and an unreachable
     threshold can be told apart.

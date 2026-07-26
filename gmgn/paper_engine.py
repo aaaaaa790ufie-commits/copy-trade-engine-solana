@@ -36,8 +36,14 @@ def gmgn_cli(args,timeout=None):
  except json.JSONDecodeError as e: raise RuntimeError(f"gmgn-cli returned non-JSON: {lines[-1][:120]}") from e
 def cli(args): return gmgn_cli(args)
 def list_rows(x):
+ """Rows from a GMGN response, which arrives as a bare list, a {"list": …} envelope,
+ or that envelope nested under "data".
+
+ A container key that is present but null means an empty result, not a row: without the
+ `in x` test, {"list": None} fell through to the final branch and was returned as one
+ row consisting of the envelope itself."""
  if isinstance(x,dict) and isinstance(x.get("data"),dict): x=x["data"]
- if isinstance(x,dict) and isinstance(x.get("list"),list): x=x["list"]
+ if isinstance(x,dict) and "list" in x: x=x["list"] if isinstance(x["list"],list) else []
  return x if isinstance(x,list) else ([x] if isinstance(x,dict) and x else [])
 def _is_winrate_key(k):
  """True for winrate/win_rate/pnl_stat.win_rate alike.
@@ -216,26 +222,39 @@ def refresh_wallet_stats(c,chain,now):
   LOG.info("refreshed stats for %d/%d stale wallets on %s",upd,len(addrs),chain)
   if new_high: emit(c,"WALLET",f"{chain} | NEW high-winrate: {len(new_high)} wallet(s) >={TOP_WINRATE*100:.0f}%, ex: {new_high[0][0]}... {new_high[0][1]*100:.0f}%")
  return upd
+def rows_under(payload,*keys):
+ """Rows from a GMGN response, whatever shape it arrives in.
+
+ The hand-written unwrapping this replaced read `d.get("list") or (d if
+ isinstance(d,list) else [])`, whose fallback for a list response could never run — the
+ .get raised first. A guard that cannot fire is worse than none, because it reads as
+ handled. list_rows already tolerates both shapes; `keys` names any extra containers
+ this endpoint uses, such as trending's "rank"."""
+ rows=list_rows(payload)
+ if rows and all(isinstance(r,dict) for r in rows):
+  for key in keys:
+   nested=[r for row in rows for r in (row.get(key) or []) if isinstance(r,dict)]
+   if nested: return nested
+ return [r for r in rows if isinstance(r,dict)]
 _DISCOV_CYCLE=0
 def discover_wallets(c,chain,now):
  global _DISCOV_CYCLE; _DISCOV_CYCLE+=1; addrs=set()
  try:
-  d=cli(["track","kol","--chain",chain,"--limit","100"])
-  for t in (d.get("list") or (d if isinstance(d,list) else [])):
+  for t in rows_under(cli(["track","kol","--chain",chain,"--limit","100"])):
    w=wallet(t)
    if w: addrs.add(w)
  except Exception as e: LOG.warning("kol %s: %s",chain,e)
  if _DISCOV_CYCLE%4==0:
   try:
-   d=cli(["market","trending","--chain",chain,"--interval","1h","--raw"])
-   items=(d.get("data",{}).get("rank") or d.get("list") or [])[:3]
+   items=rows_under(cli(["market","trending","--chain",chain,"--interval","1h","--raw"]),"rank")[:3]
    for item in items:
-    ta=item.get("address","")
+    ta=_addr(item,"address","token_address","base_address")
     if not ta: continue
     try:
-     tr=cli(["token","traders","--chain",chain,"--address",ta,"--limit","50","--order-by","profit"])
-     for t in (tr.get("data",{}).get("list") or tr.get("list") or []):
-      addr=t.get("wallet_address","") or t.get("address","")
+     for t in rows_under(cli(["token","traders","--chain",chain,"--address",ta,"--limit","50","--order-by","profit"])):
+      # Validated like every other address boundary: these go straight into
+      # wallet_watch and from there into the panel.
+      addr=_addr(t,"wallet_address","address","maker","wallet")
       if addr: addrs.add(addr)
     except Exception as ex: LOG.warning("traders %s: %s",ta[:8],ex)
   except Exception as e: LOG.warning("trending %s: %s",chain,e)
