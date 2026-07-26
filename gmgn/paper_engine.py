@@ -87,6 +87,7 @@ def wr(s): return n(s,"winrate","win_rate","pnl_stat.winrate")
 # reporting groupings that no longer match what actually carries weight.
 WEIGHT_TIERS=((0.70,0.25),(0.60,0.0625),(0.50,0.03125))
 MIN_WEIGHTED_WINRATE=WEIGHT_TIERS[-1][0]
+TOP_WINRATE=WEIGHT_TIERS[0][0]
 def weight(x):
  for threshold,w in WEIGHT_TIERS:
   if x>=threshold: return w
@@ -186,7 +187,7 @@ def refresh_wallet_stats(c,chain,now):
    if ls>0: c.execute("UPDATE wallet_watch SET winrate=?,last_seen=?,active=1,updated_at=? WHERE address=? AND chain=?",(wrv,ls,now,w,chain))
    else: c.execute("UPDATE wallet_watch SET winrate=?,active=1,updated_at=? WHERE address=? AND chain=?",(wrv,now,w,chain))
    upd+=1
-   if wrv>=.70 and old and old[0]<.70: new_high.append((w[:8],wrv))
+   if wrv>=TOP_WINRATE and old and old[0]<TOP_WINRATE: new_high.append((w[:8],wrv))
   else:
    # The API answered but gave us nothing usable. Without touching updated_at the row
    # stays at the head of the ORDER BY updated_at queue forever, and re-queries the
@@ -231,7 +232,7 @@ def cleanup_wallets(c,chain,now):
 
  Parked wallets (active=0: too small a sample, or no recent buys) are deliberately excluded.
  They are not bad traders, and a blacklisted address is never re-added by discovery."""
- low=c.execute("SELECT address FROM wallet_watch WHERE chain=? AND active=1 AND winrate>0 AND winrate<0.50",(chain,)).fetchall()
+ low=c.execute(f"SELECT address FROM wallet_watch WHERE chain=? AND active=1 AND winrate>0 AND winrate<{MIN_WEIGHTED_WINRATE}",(chain,)).fetchall()
  if low:
   c.executemany("INSERT OR IGNORE INTO wallet_blacklist(address,chain,blacklisted_at,reason) VALUES(?,?,?,'low_winrate')",[(r[0],chain,now) for r in low])
   c.executemany("DELETE FROM wallet_watch WHERE chain=? AND address=?",[(chain,r[0]) for r in low])
@@ -342,7 +343,7 @@ def cached_weights(c,chain):
  up to 20 round-trips of 45s each, which is what used to delay stop-loss checks by
  tens of minutes. Winrates barely move over an hour, so the cached value is just as
  good a weight, and refresh_wallet_stats keeps it current in the background."""
- return {a:weight(w) for a,w in c.execute("SELECT address,winrate FROM wallet_watch WHERE chain=? AND active=1 AND winrate>=0.50",(chain,)) if weight(w)>0}
+ return {a:weight(w) for a,w in c.execute(f"SELECT address,winrate FROM wallet_watch WHERE chain=? AND active=1 AND winrate>={MIN_WEIGHTED_WINRATE}",(chain,)) if weight(w)>0}
 def learn_new_makers(c,chain,trades,now):
  """Look up only makers we have never scored before, a few batches per cycle."""
  seen={r[0] for r in c.execute("SELECT address FROM wallet_watch WHERE chain=?",(chain,))}
@@ -354,7 +355,7 @@ def learn_new_makers(c,chain,trades,now):
   if wrv<=0 or is_blacklisted(c,w,chain): continue
   c.execute("INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(address,chain) DO UPDATE SET last_seen=excluded.last_seen,winrate=excluded.winrate,updated_at=excluded.updated_at",(w,chain,"gmgn",now,wrv,now))
   new_w+=1
-  if wrv>=.70: high_wr.append((w[:8],wrv))
+  if wrv>=TOP_WINRATE: high_wr.append((w[:8],wrv))
  if new_w:
   total=c.execute("SELECT COUNT(*) FROM wallet_watch WHERE chain=? AND active=1",(chain,)).fetchone()[0]
   s=f"70%+: {len(high_wr)}"+(f" ex: {high_wr[0][0]}... {high_wr[0][1]*100:.0f}%" if high_wr else "")

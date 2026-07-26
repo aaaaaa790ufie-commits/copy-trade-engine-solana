@@ -588,6 +588,51 @@ class StopLevelAgreementTests(unittest.TestCase):
         self.assertTrue(armed_at)
         self.assertGreater(at, below, "arming the trailing stop must raise the floor")
 
+    def test_no_threshold_literal_survives_a_change_to_the_ladder(self):
+        """Moving the weight ladder must move every gate that depends on it.
+
+        Pass 8 unified the panel and the bot but left literals inside paper_engine
+        itself — cached_weights filtered on a hardcoded 0.50 while weight() read the
+        tiers, so raising the bottom tier would have left the SQL admitting wallets
+        that then scored zero.
+        """
+        saved = pe.WEIGHT_TIERS, pe.MIN_WEIGHTED_WINRATE, pe.TOP_WINRATE
+        try:
+            pe.WEIGHT_TIERS = ((0.80, 0.25), (0.70, 0.0625), (0.65, 0.03125))
+            pe.MIN_WEIGHTED_WINRATE = 0.65
+            pe.TOP_WINRATE = 0.80
+
+            c = fresh_db()
+            rows = [("a" * 32, 0.60), ("b" * 32, 0.66), ("c" * 32, 0.85)]
+            c.executemany(
+                "INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) "
+                "VALUES(?,?,?,?,?,?)", [(a, "sol", "gmgn", 0, w, NOW) for a, w in rows])
+
+            weights = pe.cached_weights(c, "sol")
+            self.assertNotIn("a" * 32, weights, "0.60 is below the new bottom tier")
+            self.assertEqual(weights["b" * 32], 0.03125)
+            self.assertEqual(weights["c" * 32], 0.25)
+            # Everything cached_weights returns must carry weight; the SQL floor and
+            # weight() cannot disagree about where the bottom is.
+            self.assertTrue(all(w > 0 for w in weights.values()))
+        finally:
+            pe.WEIGHT_TIERS, pe.MIN_WEIGHTED_WINRATE, pe.TOP_WINRATE = saved
+
+    def test_cleanup_threshold_follows_the_ladder(self):
+        saved = pe.MIN_WEIGHTED_WINRATE
+        try:
+            pe.MIN_WEIGHTED_WINRATE = 0.65
+            c = fresh_db()
+            c.executemany(
+                "INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) "
+                "VALUES(?,?,?,?,?,?)",
+                [(a, "sol", "gmgn", 0, w, NOW) for a, w in (("d" * 32, 0.60), ("e" * 32, 0.70))])
+            cleanup_wallets(c, "sol", NOW)
+            self.assertTrue(pe.is_blacklisted(c, "d" * 32, "sol"), "0.60 is now sub-threshold")
+            self.assertFalse(pe.is_blacklisted(c, "e" * 32, "sol"))
+        finally:
+            pe.MIN_WEIGHTED_WINRATE = saved
+
     def test_zero_entry_price_does_not_divide(self):
         binding, _, _, armed = pe.stop_level(0.0, 1.0)
         self.assertFalse(armed)
