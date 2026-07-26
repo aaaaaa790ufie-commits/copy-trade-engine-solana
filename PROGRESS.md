@@ -1023,3 +1023,91 @@ complete in 5.5–9.4 s against a 15 s poll. The panel is published over HTTPS w
 Telegram `initData` verification pinned to the owner's chat; `/api/health` is the only
 unauthenticated endpoint, and it exists so the tunnel probe can confirm the URL serves
 before the bot is pointed at it.
+
+---
+
+# Strategy change — 2026-07-26 (operator-directed)
+
+Requested changes, all applied and verified.
+
+## Weight ladder and entry threshold
+
+| 30d win rate | Was | Now | Against `ENTRY_SCORE=1.0` |
+|---|---:|---:|---|
+| 90–100% | 0.25 | **1.0** | enters on its own |
+| 80–90% | 0.25 | **0.5** | two of them enter |
+| 70–80% | 0.25 | 0.25 | four of them enter |
+| 60–70% | 0.0625 | 0.0625 | contributes only |
+| 50–60% | 0.03125 | 0.03125 | contributes only |
+
+`GMGN_ENTRY_SCORE` returns to **1.0** from 0.25. The two numbers only mean anything
+read together: the old pairing was a 0.25 top tier against a 0.25 threshold, so one
+70% wallet was a full signal and every entry to date fired on `wallets=1`.
+
+Effect on the current pool: **155 of 1191** watched wallets can now enter alone, where
+**318** could before — roughly half as many solo triggers, plus the new combinations.
+
+## A 90%+ wallet now enters rather than being announced
+
+Its weight equals the threshold, so `enter()` opens the position and emits `ENTRY`.
+Repeating that as a separate call-out would be duplication, so the notification is
+inverted: `MISSED` reports a signal strong enough to enter that was **declined**, and
+why — cooldown, already held, or out of funds. Those are the entries the configuration
+cost you, which is the part worth knowing.
+
+## Auto-close after one hour
+
+`GMGN_MAX_HOLD_SECONDS` 21600 → **3600**. `GMGN_STUCK_AFTER_SECONDS` follows at 2×.
+
+## Account reset
+
+`gmgn/reset_account.py`, new. The open position was settled at the market
+(−31.43%, −0.00786 SOL) and the balance restored to 0.1 SOL. Backup taken first.
+
+The top-up raises `initial_budget_sol` by the same amount, so cumulative P&L still
+reads −0.06899 rather than pretending the loss did not happen. `reset_at` is recorded,
+and `/status` and `/api/overview` now report performance since that point separately
+from lifetime.
+
+## Attribution — the improvement worth having
+
+The engine recorded that four wallets agreed but never which four, so the question the
+whole system exists to answer was unanswerable: which wallets make *this account*
+money, as opposed to having a good win rate on GMGN.
+
+`trade_wallets` now records the contributors and their weights at entry, and
+`wallet_attribution()` splits each closed trade's P&L by weight share — a lone 90%
+wallet owns its whole result, one of four owns a quarter. Surfaced as `/attribution`
+and a «Вклад» tab in the panel. A test asserts the shares reconcile exactly with
+realised P&L.
+
+## Verification
+
+```
+$ python -m unittest discover -s gmgn -p 'test_*.py'
+Ran 154 tests in 9.511s
+OK
+```
+
+Three failures along the way were guard tests written in earlier passes doing their
+job, not accidents: the new `/api/attribution` endpoint had to be acknowledged by the
+auth-gate test, and the changed defaults had to be written into `.env.example` before
+the documentation test would pass.
+
+Writing the reset-relative reporting also surfaced an off-by-one in this same work:
+`realised_since` used `event_ts >= reset_at`, and the settlement of the old positions
+carries `event_ts == reset_at` exactly, so the first reading charged the old strategy's
+−0.00786 SOL to the new one. Strictly-after now, and pinned by a test.
+
+## Open
+
+`ISSUES.md` item 2 is now partly acted on — the threshold is raised and the account
+reset — but its substance stands: at 12 closed trades the sample still cannot
+distinguish a good strategy from a lucky one. What changes that is more trades, not
+more tuning. Items 1, 3 and 4 are unchanged, and `unban_wallets.py` still has not run.
+
+One consequence worth watching rather than pre-emptively changing: with a 1 h hold the
+trailing stop, which arms at +25%, has far less time to arm than it did over 6 h. Of
+the 12 trades so far exactly one exceeded +25%. If that stays true the trailing stop is
+close to inert and the hard stop plus the hour does the work — worth revisiting once
+there are enough trades to say.
