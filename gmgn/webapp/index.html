@@ -378,6 +378,12 @@ async function viewWallets(){
     <div class="row"><span class="sub">В чёрном списке</span><b class="num down">${blacklisted}</b></div>
   </div>`;
   if (!wallets.length) return head + `<div class="card empty">Кошельки ещё не загружены</div>`;
+  // Green = enters on its own, plain = carries weight, orange = neither. Both cutoffs
+  // come from the engine's ladder for the same reason the labels above do: this file
+  // already carried 90 and 70 as literals, and 70 stopped meaning anything when the
+  // tiers were rewritten.
+  const elite = (overview?.config?.elite_winrate ?? 0.9) * 100;
+  const weighted = (overview?.config?.min_weighted_winrate ?? 0.5) * 100;
   return head + `<div class="sec-title">Топ по winrate</div><div class="card">` + wallets.map(w => {
     const wr = w.winrate * 100;
     return `<div class="row">
@@ -385,7 +391,7 @@ async function viewWallets(){
         <a class="link mint" href="https://gmgn.ai/sol/address/${encodeURIComponent(w.address)}" target="_blank" rel="noopener">${short(w.address)}</a>
         <div class="sub">${esc(w.source)}${w.last_seen ? " · был " + ago(Math.max(0,(overview?.server_time||Date.now()/1000) - w.last_seen)) + " назад" : ""}</div>
       </div>
-      <b class="num ${wr>=90?"up":wr>=70?"":"warn"}">${wr.toFixed(0)}%</b>
+      <b class="num ${wr>=elite?"up":wr>=weighted?"":"warn"}">${wr.toFixed(0)}%</b>
     </div>`;
   }).join("") + `</div>`;
 }
