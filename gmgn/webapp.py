@@ -567,9 +567,33 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, body, ctype)
 
 
+class _Server(ThreadingHTTPServer):
+    """ThreadingHTTPServer that will not quietly share a port with another instance.
+
+    On POSIX, SO_REUSEADDR only permits rebinding a port left in TIME_WAIT — an active
+    listener still wins, so the stdlib default is safe and worth keeping for fast
+    restarts. On Windows it means something else entirely: a second process can bind a
+    port a live server is already listening on, both succeed, and the OS hands each
+    incoming connection to whichever it likes.
+
+    That is reachable from the documented workflow. README says the pieces can be run
+    individually, so `python gmgn/webapp.py` alongside a running supervisor gives two
+    servers on 8770 — and the standalone one computes REQUIRE_AUTH with no public URL in
+    its environment, so it serves the account data unauthenticated. Roughly half the
+    requests arriving down the tunnel would land on it.
+
+    Failing to bind is the correct outcome, and the caller turns it into a clear message.
+    """
+    allow_reuse_address = os.name != "nt"
+
+
 def serve(host: str | None = None, port: int | None = None, block: bool = True):
-    host = host or config.WEBAPP_HOST
-    port = port or config.WEBAPP_PORT
+    # `or` treated an explicit 0 as "not supplied" and replaced it with WEBAPP_PORT.
+    # port=0 is the standard "give me any free port" idiom, so a caller asking for one
+    # silently got the production port instead — which, with the sharing described
+    # above, meant binding on top of a running server rather than beside it.
+    host = config.WEBAPP_HOST if host is None else host
+    port = config.WEBAPP_PORT if port is None else port
     # --host is a CLI argument, so it can differ from the value REQUIRE_AUTH was
     # computed from at import. Serving the account and wallet data unauthenticated to
     # the whole LAN should take a deliberate act, not a forgotten flag.
@@ -580,8 +604,17 @@ def serve(host: str | None = None, port: int | None = None, block: bool = True):
             "WEBAPP_REQUIRE_AUTH=0 explicitly if this network is trusted."
         )
     stop = threading.Event()
+    try:
+        httpd = _Server((host, port), Handler)
+    except OSError as e:
+        raise SystemExit(
+            f"cannot bind {host}:{port} — {e}\n"
+            "Another Sentinel webapp is probably already running (the supervisor starts "
+            "one). Stop it first, or set WEBAPP_PORT to a free port."
+        ) from None
+    # Started only once the port is ours, so a refused bind does not leave a thread
+    # polling the price API behind a process that is about to exit.
     threading.Thread(target=_price_refresher, args=(stop,), daemon=True, name="prices").start()
-    httpd = ThreadingHTTPServer((host, port), Handler)
     LOG.info("mini app on http://%s:%d (auth %s)", host, port, "required" if REQUIRE_AUTH else "off — local only")
     if config.WEBAPP_PUBLIC_URL:
         LOG.info("public origin: %s", config.WEBAPP_PUBLIC_URL)

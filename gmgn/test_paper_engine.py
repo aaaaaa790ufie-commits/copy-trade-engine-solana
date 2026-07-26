@@ -1790,6 +1790,38 @@ class AuthDefaultTests(unittest.TestCase):
         config.WEBAPP_PUBLIC_URL, config.WEBAPP_HOST = "", "0.0.0.0"
         self.assertTrue(self.webapp._reachable_from_outside())
 
+    def test_an_explicit_port_zero_is_honoured(self):
+        # `port or config.WEBAPP_PORT` treated 0 — the standard "any free port" idiom —
+        # as "not supplied", so a caller asking for an ephemeral port silently got the
+        # production one and bound on top of a running server instead of beside it.
+        httpd, stop = self.webapp.serve(host="127.0.0.1", port=0, block=False)
+        try:
+            self.assertNotEqual(httpd.server_address[1], config.WEBAPP_PORT)
+            self.assertGreater(httpd.server_address[1], 0)
+        finally:
+            stop.set()
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_a_second_instance_cannot_share_the_port(self):
+        """README documents running the pieces individually, so `python gmgn/webapp.py`
+        beside a running supervisor is a normal thing to do. On Windows SO_REUSEADDR
+        lets the second process bind a port a live server already holds — both succeed
+        and the OS splits connections between them. The standalone one computes
+        REQUIRE_AUTH with no public URL in its environment, so it answers without a
+        signature; roughly half of the tunnel's requests would reach it."""
+        first, stop = self.webapp.serve(host="127.0.0.1", port=0, block=False)
+        port = first.server_address[1]
+        try:
+            with self.assertRaises(SystemExit) as ctx:
+                self.webapp.serve(host="127.0.0.1", port=port, block=False)
+            self.assertIn("cannot bind", str(ctx.exception))
+            self.assertIn("already running", str(ctx.exception))
+        finally:
+            stop.set()
+            first.shutdown()
+            first.server_close()
+
     def test_serving_unauthenticated_off_loopback_is_refused(self):
         with self.assertRaises(SystemExit) as ctx:
             self.webapp.serve(host="0.0.0.0", port=0, block=False)
@@ -2671,6 +2703,131 @@ class StaticFileTests(unittest.TestCase):
 
     def test_empty_path_is_none(self):
         self.assertIsNone(self.webapp.resolve_static("//"))
+
+
+class HttpLayerTests(unittest.TestCase):
+    """Real requests over a real socket.
+
+    Every other webapp test calls the route handlers directly, which skips the entire
+    layer that faces the internet: path routing, the auth gate, the error-to-status
+    mapping, headers, HEAD, and static serving. The auth gate is what stands between a
+    public tunnel and the account data, and nothing had ever exercised it through an
+    actual request — only `verify_init_data` in isolation.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import http.client
+        import webapp
+        cls.http, cls.webapp = http.client, webapp
+        cls._auth = webapp.REQUIRE_AUTH
+        webapp.REQUIRE_AUTH = True          # as it is whenever a public origin exists
+        cls.httpd, cls.stop = webapp.serve(host="127.0.0.1", port=0, block=False)
+        cls.port = cls.httpd.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.webapp.REQUIRE_AUTH = cls._auth
+        cls.stop.set()
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def _get(self, path, method="GET", headers=None):
+        conn = self.http.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        try:
+            conn.request(method, path, headers=headers or {})
+            r = conn.getresponse()
+            return r.status, r.read(), dict(r.getheaders())
+        finally:
+            conn.close()
+
+    def test_health_answers_without_a_signature(self):
+        # The tunnel probes this to decide whether the origin really serves. If it
+        # required auth, no tunnel would ever be published.
+        status, body, _ = self._get("/api/health")
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["ok"])
+
+    def test_every_other_endpoint_refuses_without_a_signature(self):
+        for path in sorted(self.webapp.ROUTES):
+            if path == "/api/health":
+                continue
+            with self.subTest(path):
+                status, body, _ = self._get(path)
+                self.assertEqual(status, 401, f"{path} answered unauthenticated")
+                self.assertNotIn(b"budget_sol", body, "no data may leak in the refusal")
+
+    def test_a_trailing_slash_does_not_bypass_the_gate(self):
+        # do_GET strips it before routing; if it did not, "/api/overview/" would miss
+        # ROUTES and 404 — but a lookalike that matched would skip the auth check.
+        status, _, _ = self._get("/api/overview/")
+        self.assertEqual(status, 401)
+
+    def test_an_unknown_api_path_is_a_clean_404(self):
+        status, body, _ = self._get("/api/does-not-exist")
+        self.assertEqual(status, 404)
+        self.assertIn("unknown endpoint", json.loads(body)["error"])
+
+    def test_the_page_itself_is_served(self):
+        status, body, headers = self._get("/")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", headers["Content-Type"])
+        self.assertIn(b"<title>", body)
+        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+
+    def test_traversal_over_the_wire_is_refused(self):
+        for path in ("/../.env", "/../../.env", "/..%2f.env", "/C:/Windows/win.ini"):
+            with self.subTest(path):
+                status, body, _ = self._get(path)
+                self.assertEqual(status, 404, f"{path} was served")
+                self.assertNotIn(b"TELEGRAM", body)
+
+    def test_head_returns_headers_and_no_body(self):
+        status, body, headers = self._get("/api/health", method="HEAD")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b"")
+        self.assertIn("Content-Length", headers)
+
+    def _signed_headers(self):
+        """A valid initData for a stand-in bot token, so the gate can be passed."""
+        import hashlib
+        import hmac
+        import urllib.parse
+
+        token, chat = "123:TESTTOKEN", "555"
+        saved = (self.webapp.config.TELEGRAM_BOT_TOKEN, self.webapp.config.TELEGRAM_CHAT_ID)
+        self.webapp.config.TELEGRAM_BOT_TOKEN = token
+        self.webapp.config.TELEGRAM_CHAT_ID = chat
+        self.addCleanup(lambda: setattr(self.webapp.config, "TELEGRAM_BOT_TOKEN", saved[0]))
+        self.addCleanup(lambda: setattr(self.webapp.config, "TELEGRAM_CHAT_ID", saved[1]))
+
+        fields = {"user": json.dumps({"id": 555}), "auth_date": str(int(time.time()))}
+        check = "\n".join(f"{k}={v}" for k, v in sorted(fields.items()))
+        secret = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
+        fields["hash"] = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+        return {"X-Telegram-Init-Data": urllib.parse.urlencode(fields)}
+
+    def test_a_signed_request_is_answered(self):
+        # Without this the 401 tests above would also pass on a server that refused
+        # everything, which is not the property being claimed.
+        status, body, _ = self._get("/api/overview", headers=self._signed_headers())
+        self.assertEqual(status, 200)
+        self.assertIn("balance_sol", json.loads(body))
+
+    def test_a_database_error_is_503_and_discloses_no_path(self):
+        # Over a public tunnel an exception string can hand out filesystem paths, so the
+        # detail goes to the log and the response says only that the db is unavailable.
+        headers = self._signed_headers()
+        original = self.webapp.db
+        self.webapp.db = lambda: (_ for _ in ()).throw(
+            sqlite3.OperationalError("unable to open database file /home/secret/sentinel.db"))
+        self.addCleanup(lambda: setattr(self.webapp, "db", original))
+
+        with self.assertLogs("webapp", level="WARNING"):
+            status, body, _ = self._get("/api/overview", headers=headers)
+        self.assertEqual(status, 503)
+        self.assertNotIn(b"/home/secret", body)
+        self.assertNotIn(b"sentinel.db", body)
 
 
 class TunnelTests(unittest.TestCase):
