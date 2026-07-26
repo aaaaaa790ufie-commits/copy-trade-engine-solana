@@ -686,3 +686,45 @@ will idle. That is a decision point, not a defect.
 
 **Confidence that `gmgn/` is production-ready: high.** Pass 7 found one issue, so it
 was not clean. Pass 8 follows.
+
+## Pass 8 — 2026-07-26
+
+Lens: consistency *between* modules — rules implemented more than once.
+
+### Found and fixed
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 52 | Medium | The stop level was computed independently in `exits()`, the Mini App and the bot's `/positions`. They agreed, but nothing made them agree: a change to `exits()` would have left both surfaces displaying a stop the engine no longer enforced | `pe.stop_level()` — one definition, used to decide and to display | `47fcf47` |
+| 53 | Low | "Is the engine alive" was two copies of `max(120, POLL*6)` | `pe.engine_is_alive()`, plus `GMGN_ALIVE_GRACE_SECONDS` | `47fcf47` |
+| 54 | Low | Win-rate buckets in the panel and `/wallets` hardcoded 0.90/0.70/0.60/0.50, mirroring `weight()` by hand | `WEIGHT_TIERS` is the ladder `weight()` applies and the buckets are built from it | `47fcf47` |
+
+Showing a stop that is not the stop is worse than showing nothing, which is why a
+triplicated rule counts as a defect here rather than a style preference.
+
+### Verification
+
+```
+$ python -m unittest test_paper_engine
+Ran 135 tests in 10.164s
+OK
+```
+
+The new agreement test was checked by making `exits()` close 5% away from the level
+it reports; `test_exits_closes_exactly_at_the_reported_level` then failed on every
+scenario. Reverted, and the remaining diff confirmed to contain only the refactor.
+
+Live cross-check against the real open position: engine, panel and bot all report a
+stop of `1.839089e-06`. Wallet buckets agree too — the panel's `w90=157` plus
+`w70=163` is the bot's `70%+ 320`.
+
+The documentation test from Pass 5 earned its keep unprompted: adding
+`GMGN_ALIVE_GRACE_SECONDS` failed `test_every_tunable_is_documented` until it was
+written into `.env.example`.
+
+### Still open
+
+`ISSUES.md` unchanged.
+
+**Confidence that `gmgn/` is production-ready: high.** Pass 8 found three issues, so
+it was not clean. Pass 9 follows.
