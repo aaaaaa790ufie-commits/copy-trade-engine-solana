@@ -91,9 +91,27 @@ class Tunnel:
 
     # -- public API ---------------------------------------------------------
 
+    def provider_order(self) -> list[str]:
+        """Providers to try, best guess first.
+
+        Whichever one worked last goes first. Free sessions expire hourly, so `auto`
+        reconnects roughly once an hour — and it re-ran the full cloudflared attempt
+        every single time, on a network where cloudflared cannot work at all (see
+        CLAUDE.md: the TLS handshake to the edge is reset). Measured on the 23:32
+        reconnect: 90 of the 93 seconds the panel was unreachable were spent
+        rediscovering that.
+
+        Preference only, never exclusion — if the remembered provider stops working the
+        loop falls through to the others exactly as before.
+        """
+        order = ["cloudflared", "pinggy"] if self.provider == "auto" else [self.provider]
+        if self.active_provider in order:
+            order = [self.active_provider] + [n for n in order if n != self.active_provider]
+        return order
+
     def start(self) -> str:
         """Bring up a tunnel and return a URL that actually serves, or "" on failure."""
-        order = ["cloudflared", "pinggy"] if self.provider == "auto" else [self.provider]
+        order = self.provider_order()
         for name in order:
             attempt = getattr(self, f"_start_{name}", None)
             if attempt is None:

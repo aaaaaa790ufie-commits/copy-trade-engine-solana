@@ -2594,6 +2594,24 @@ class TunnelTests(unittest.TestCase):
     def tearDown(self):
         self.tunnel.PROBE_TIMEOUT = self._probe
 
+    def test_a_reconnect_tries_the_provider_that_worked_first(self):
+        """Free sessions expire hourly, so `auto` reconnects about once an hour. It
+        re-ran the whole cloudflared attempt each time on a network that cannot use it
+        — 90 of the 93 seconds the panel was down on the 23:32 reconnect went to
+        rediscovering that. Preference, not exclusion: the others are still tried."""
+        t = self.tunnel.Tunnel(port=8770, provider="auto")
+        self.assertEqual(t.provider_order(), ["cloudflared", "pinggy"],
+                         "first time through, the documented order stands")
+
+        t.active_provider = "pinggy"
+        self.assertEqual(t.provider_order(), ["pinggy", "cloudflared"])
+        self.assertEqual(len(t.provider_order()), 2, "the loser must remain a fallback")
+
+    def test_an_explicit_provider_is_still_the_only_one_tried(self):
+        t = self.tunnel.Tunnel(port=8770, provider="pinggy")
+        t.active_provider = "cloudflared"     # stale, and must not widen the choice
+        self.assertEqual(t.provider_order(), ["pinggy"])
+
     class _FakeProc:
         """A process whose stdout yields fixed lines and then ends."""
 
