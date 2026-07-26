@@ -1111,3 +1111,52 @@ trailing stop, which arms at +25%, has far less time to arm than it did over 6 h
 the 12 trades so far exactly one exceeded +25%. If that stays true the trailing stop is
 close to inert and the hard stop plus the hour does the work — worth revisiting once
 there are enough trades to say.
+
+---
+
+# Second hardening cycle — 2026-07-26
+
+The clean-pass counter restarts: the strategy change, attribution, the metrics format
+and the 500 fix all landed after Pass 14, so two consecutive clean passes are required
+again from here.
+
+## Pass 15 — 2026-07-26
+
+Lens: the least-reviewed code in the repository — everything written in the last two
+sessions.
+
+### Found and fixed
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 59 | Medium | `missed_elite_signals` runs after `enter()` and read open positions from the database, so a mint opened moments earlier counted as "already held". Every successful elite entry produced both an `ENTRY` and a contradictory `MISSED` for the same buy | `enter()` returns the mints it opened; the report excludes them | `6cfb09b` |
+| 60 | Medium | Two operator-facing messages hardcoded "70%" while counting `TOP_WINRATE`, which the strategy change moved to 90%. Telegram reported "70%+: 3" about wallets at 90%+ | Both derive the figure they quote | `7a2f1c8` |
+| 61 | Medium | Threading win rates through for attribution left `cycle()` with its own copy of the weight derivation, so `cached_weights` was called only by tests — coverage of a path production no longer took | `weights_from()` is the single derivation | `7a2f1c8` |
+| 62 | Medium | `reset_account.close_all` set no cooldown, unlike every other exit path, so the engine could re-buy the token it had just settled on the next poll. The script mutates the operator's account and had no tests at all | Cooldown set; six tests added | `76b42f1` |
+
+Findings 59–61 are regressions from the previous two sessions rather than inherited
+bugs, which is the argument for the stopping condition being two passes.
+
+### Verification
+
+```
+$ python -m unittest discover -s gmgn -p 'test_*.py'
+Ran 176 tests in 9.698s
+OK
+```
+
+Both new guard tests were checked by reintroducing the bug: removing the `just_opened`
+exclusion fails with `'MISSED' unexpectedly found in ['ENTRY', 'MISSED']`, and reverting
+the label fails on the threshold string. Working tree confirmed clean after each.
+
+### Checked and found sound — recorded, not changed
+
+- **Attribution across a re-entered mint.** `enter()` reuses the position row, so an
+  entry/exit/re-entry/exit sequence could have mismatched the join. Driven through it:
+  2 trades counted, reconciling exactly with realised P&L.
+- **The equity curve** ends at 0.1, matching the headline, because the top-up raised
+  `initial_budget_sol` by the same amount. The accounting choice in `reset_account`
+  is what holds the chart and the balance together.
+- **The panel after several regex edits**: all six tabs render with no JavaScript
+  errors, the extracted script passes `node --check`, braces balance, and no function
+  is defined without being referenced.
