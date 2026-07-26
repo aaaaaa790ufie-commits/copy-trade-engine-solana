@@ -148,6 +148,10 @@ CREATE TABLE IF NOT EXISTS wallet_blacklist(address TEXT NOT NULL,chain TEXT NOT
 CREATE TABLE IF NOT EXISTS token_scores(chain TEXT NOT NULL,token_mint TEXT NOT NULL,score REAL NOT NULL,buy_wallets INTEGER NOT NULL,total_wallets INTEGER NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(chain,token_mint));
 CREATE TABLE IF NOT EXISTS engine_events(id INTEGER PRIMARY KEY AUTOINCREMENT,event_ts INTEGER NOT NULL,kind TEXT NOT NULL,message TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS engine_state(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at INTEGER NOT NULL);
+-- Best cluster score reached on each cycle. Without it "LIVE, 0 positions" is
+-- ambiguous: a quiet market and an unreachable threshold look identical, and the
+-- operator has no way to judge the configuration they chose.
+CREATE TABLE IF NOT EXISTS signal_history(event_ts INTEGER PRIMARY KEY,best_score REAL NOT NULL,mints INTEGER NOT NULL);
 -- Which wallets produced each entry, and what each contributed to the score. Without
 -- this the engine records that four wallets agreed but not which four, so there is no
 -- way to ask the question the whole system exists to answer: which wallets actually
@@ -352,11 +356,32 @@ def exits(c,chain,trades,now):
   c.execute("UPDATE paper_account SET bankrupt=0,updated_at=? WHERE id=1",(now,)); emit(c,"RECOVERY",f"баланс {a[0]:.5f} SOL снова покрывает ставку {STAKE:.4f} — paper-трейдинг возобновлён")
 def save_token_scores(c,chain,trades,weights,now):
  """Publish the same cluster view enter() acts on, so /weights matches reality."""
+ latest=cluster(chain,trades,weights,now)
+ record_signal_strength(c,now,latest,weights)
  c.execute("DELETE FROM token_scores WHERE chain=?",(chain,))
- for m,ws in cluster(chain,trades,weights,now).items():
+ for m,ws in latest.items():
   buys,score=score_of(ws,weights)
   if score>0:
    c.execute("INSERT INTO token_scores(chain,token_mint,score,buy_wallets,total_wallets,updated_at) VALUES(?,?,?,?,?,?)",(chain,m,score,len(buys),len(ws),now))
+SIGNAL_HISTORY_HOURS=config.get_int("GMGN_SIGNAL_HISTORY_HOURS",24)
+def record_signal_strength(c,now,latest,weights):
+ """Note how close this cycle came to an entry, and prune beyond the window.
+
+ An engine that is cycling, scoring and entering nothing looks exactly like one whose
+ threshold is out of reach. This is the number that tells them apart."""
+ best=max((score_of(ws,weights)[1] for ws in latest.values()),default=0.0)
+ c.execute("INSERT INTO signal_history VALUES(?,?,?) ON CONFLICT(event_ts) DO UPDATE SET best_score=excluded.best_score,mints=excluded.mints",(now,best,len(latest)))
+ c.execute("DELETE FROM signal_history WHERE event_ts<?",(now-SIGNAL_HISTORY_HOURS*3600,))
+ return best
+def signal_summary(c,now=None):
+ """How near the engine has been to entering, over the retained window."""
+ now=int(now or time.time())
+ row=c.execute("SELECT COUNT(*),MAX(best_score),AVG(best_score) FROM signal_history").fetchone()
+ cycles,best,avg=(row or (0,None,None))
+ reached=c.execute("SELECT COUNT(*) FROM signal_history WHERE best_score>=?",(ENTRY,)).fetchone()[0]
+ return {"cycles":cycles or 0,"best_score":best or 0.0,"mean_score":avg or 0.0,
+         "cycles_at_threshold":reached or 0,"entry_score":ENTRY,
+         "window_hours":SIGNAL_HISTORY_HOURS}
 MAINT_INTERVAL=config.get_int("GMGN_MAINTENANCE_SECONDS",600)
 _last_maint={}
 ATTRIBUTION_SQL="""

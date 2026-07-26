@@ -363,9 +363,19 @@ def text(c: sqlite3.Connection, command: str) -> str:
             "SELECT chain,token_mint,score,buy_wallets,total_wallets FROM token_scores "
             "WHERE score>0 ORDER BY score DESC LIMIT 10"
         ).fetchall()
+        # "LIVE with no positions" is ambiguous — a quiet market and a threshold that is
+        # out of reach look identical from outside. This is the number that separates them.
+        s = pe.signal_summary(c)
+        head_lines = []
+        if s["cycles"]:
+            head_lines.append(
+                f"За {s['window_hours']}ч: лучший сигнал {s['best_score']:.4f} из "
+                f"{s['entry_score']}, порог взят "
+                f"{_plural(s['cycles_at_threshold'], 'раз', 'раза', 'раз')} "
+                f"за {s['cycles']} циклов")
         if not rs:
-            return "Нет монет с ненулевым весом — движок ещё не собрал кластер."
-        head = f"Порог входа: {config.ENTRY_SCORE}\n"
+            return "\n".join(head_lines + ["Нет монет с ненулевым весом — движок ещё не собрал кластер."])
+        head = "\n".join(head_lines + [f"Порог входа: {config.ENTRY_SCORE}"]) + "\n"
         return head + "\n".join(
             f"{i+1}. {r[1][:10]}… score {r[2]:.4f} (не хватает {max(0, config.ENTRY_SCORE - r[2]):.4f}) · {r[3]}/{r[4]} кош."
             for i, r in enumerate(rs))

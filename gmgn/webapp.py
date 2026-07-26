@@ -393,6 +393,7 @@ def api_weights(limit: int = 30) -> dict:
         ).fetchall()
         return {
             "entry_score": config.ENTRY_SCORE,
+            "signal": pe.signal_summary(c),
             "weights": [dict(r) | {"need": max(0.0, config.ENTRY_SCORE - r["score"])} for r in rows],
         }
     finally:

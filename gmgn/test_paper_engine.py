@@ -1774,6 +1774,68 @@ class OperatorFacingLabelTests(unittest.TestCase):
             pe.TOP_WINRATE = saved
 
 
+class SignalReachTests(unittest.TestCase):
+    """How close the engine has come to entering, so a quiet market and an unreachable
+    threshold can be told apart.
+
+    Measured live after the entry threshold moved to 1.0: 154 elite wallets in the pool,
+    zero appearances in the feed over four samples, best cluster score 0.0625. The engine
+    was healthy, cycling and scoring — and nowhere near a trade. Nothing reported that.
+    """
+
+    def _cycle_at(self, c, ts, weight):
+        trades = [{"maker": WALLET_A, "base_address": MINT_A, "side": "buy",
+                   "timestamp": ts, "price_usd": 1.0, "launchpad": "pump"}]
+        pe.save_token_scores(c, "sol", trades, {WALLET_A: weight}, ts)
+
+    def test_nothing_recorded_yet_reports_zero(self):
+        s = pe.signal_summary(fresh_db())
+        self.assertEqual(s["cycles"], 0)
+        self.assertEqual(s["best_score"], 0.0)
+        self.assertEqual(s["cycles_at_threshold"], 0)
+
+    def test_it_records_the_best_score_each_cycle(self):
+        c = fresh_db()
+        for i, w in enumerate((0.25, 0.0625, 0.5)):
+            self._cycle_at(c, NOW + i, w)
+        s = pe.signal_summary(c)
+        self.assertEqual(s["cycles"], 3)
+        self.assertAlmostEqual(s["best_score"], 0.5)
+        self.assertEqual(s["cycles_at_threshold"], 0, "none of those reached 1.0")
+
+    def test_it_counts_the_cycles_that_reached_the_threshold(self):
+        c = fresh_db()
+        self._cycle_at(c, NOW, pe.ENTRY)
+        self._cycle_at(c, NOW + 1, pe.ENTRY / 4)
+        self._cycle_at(c, NOW + 2, pe.ENTRY)
+        self.assertEqual(pe.signal_summary(c)["cycles_at_threshold"], 2)
+
+    def test_history_is_pruned_to_the_window(self):
+        c = fresh_db()
+        old = NOW - pe.SIGNAL_HISTORY_HOURS * 3600 - 60
+        c.execute("INSERT INTO signal_history VALUES(?,?,?)", (old, 0.9, 1))
+        self._cycle_at(c, NOW, 0.25)
+        kept = [r[0] for r in c.execute("SELECT event_ts FROM signal_history")]
+        self.assertNotIn(old, kept, "beyond the window it must be dropped")
+        self.assertEqual(len(kept), 1)
+
+    def test_an_empty_cluster_still_records_a_cycle(self):
+        # A cycle where nothing scored is itself the answer to "why no trades".
+        c = fresh_db()
+        pe.save_token_scores(c, "sol", [], {WALLET_A: 1.0}, NOW)
+        s = pe.signal_summary(c)
+        self.assertEqual(s["cycles"], 1)
+        self.assertEqual(s["best_score"], 0.0)
+
+    def test_weights_command_reports_the_reach(self):
+        import telegram_bot as bot
+        c = fresh_db()
+        self._cycle_at(c, NOW, 0.0625)
+        out = bot.reply(c, "/weights")
+        self.assertIn("лучший сигнал", out)
+        self.assertIn("0.0625", out)
+
+
 class FeedHealthTests(unittest.TestCase):
     """A cycling loop and a working engine are different states.
 
