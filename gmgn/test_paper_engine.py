@@ -2988,11 +2988,49 @@ class BotCommandListTests(unittest.TestCase):
         for name in listed:
             self.assertIn(name + " — ", self.bot.help_text())
 
+    def test_readme_lists_exactly_these_commands(self):
+        readme = (pathlib.Path(config.ROOT) / "README.md").read_text(encoding="utf-8")
+        line = next(ln for ln in readme.splitlines() if ln.startswith("Telegram commands:"))
+        self.assertEqual(set(re.findall(r"`/(\w+)`", line)),
+                         {name for name, _, _ in self.bot.COMMANDS},
+                         "README's command line has drifted from the bot")
+
     def test_claude_md_documents_exactly_these_commands(self):
         doc = (pathlib.Path(config.ROOT) / "CLAUDE.md").read_text(encoding="utf-8")
         documented = set(re.findall(r"^\|\s*`/(\w+)`\s*\|", doc, re.M))
         self.assertEqual(documented, {name for name, _, _ in self.bot.COMMANDS},
                          "CLAUDE.md's command table has drifted from the bot")
+
+
+class ReadmeAccuracyTests(unittest.TestCase):
+    """README is the front door, and it had drifted on the three numbers that decide
+    what gets traded — it still described the ladder and threshold the operator
+    replaced, and a 6h hold that had become 1h. CLAUDE.md was right, so nothing
+    disagreed loudly enough to notice."""
+
+    def setUp(self):
+        self.readme = (pathlib.Path(config.ROOT) / "README.md").read_text(encoding="utf-8")
+
+    def test_the_weight_ladder_matches_the_engine(self):
+        rows = re.findall(r"^\|\s*(\d+)% to <?1?0?0?(?:\d+)?%\s*\|\s*([\d.]+)\s*\|", self.readme, re.M)
+        documented = [(int(low) / 100, float(w)) for low, w in rows]
+        self.assertEqual(documented, list(pe.WEIGHT_TIERS),
+                         "README's weight table has drifted from WEIGHT_TIERS")
+
+    def test_the_entry_threshold_matches_the_engine(self):
+        found = re.search(r"`GMGN_ENTRY_SCORE` \(default ([\d.]+)\)", self.readme)
+        self.assertIsNotNone(found, "README should state the entry threshold")
+        self.assertEqual(float(found.group(1)), pe.ENTRY)
+
+    def test_the_max_hold_matches_the_engine(self):
+        found = re.search(r"Max holding time defaults to (\d+)h", self.readme)
+        self.assertIsNotNone(found, "README should state the max hold")
+        self.assertEqual(int(found.group(1)) * 3600, pe.MAX_HOLD)
+
+    def test_the_documented_api_surface_is_the_real_one(self):
+        import webapp
+        self.assertEqual(set(re.findall(r"`(/api/\w+)`", self.readme)), set(webapp.ROUTES),
+                         "README's endpoint list has drifted from ROUTES")
 
 
 class MonitorTests(unittest.TestCase):

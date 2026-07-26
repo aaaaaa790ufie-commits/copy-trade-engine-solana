@@ -9,15 +9,19 @@ GMGN Smart Money feed -> 7d activity + 30d win rate -> weighted convergence
 
 ## Strategy
 
-A wallet is eligible when it traded during the last 7 days and its 30-day win rate is at least 50%. Signal weights:
+A wallet is eligible when it traded during the last 7 days and its 30-day win rate is at least 50%. Signal weights (`paper_engine.WEIGHT_TIERS`, the single source — the panel and the bot build their buckets from it):
 
-| 30d win rate | Weight |
-|---|---:|
-| 50% to <60% | 0.03125 |
-| 60% to <70% | 0.0625 |
-| 70%+ | 0.25 |
+| 30d win rate | Weight | Against `ENTRY_SCORE=1.0` |
+|---|---:|---|
+| 90% to 100% | 1.0 | enters on its own |
+| 80% to <90% | 0.5 | two of them enter |
+| 70% to <80% | 0.25 | four of them enter |
+| 60% to <70% | 0.0625 | contributes only |
+| 50% to <60% | 0.03125 | contributes only |
 
-A token entry requires the weighted score to reach `GMGN_ENTRY_SCORE` (default 0.25, i.e. one 70%+ wallet) inside a 30-minute window. Existing positions are never re-entered; a closed token has a cooldown. This is a ranking heuristic, not a probability claim.
+A token entry requires the weighted score to reach `GMGN_ENTRY_SCORE` (default 1.0) inside a 30-minute window. Existing positions are never re-entered; a closed token has a cooldown. This is a ranking heuristic, not a probability claim.
+
+The ladder and the threshold only mean something read together. An earlier pairing put a 0.25 top tier against a 0.25 threshold, so a single 70% wallet was already a full signal and "weighted convergence" never converged — every entry fired on one wallet.
 
 Weights are read from the win rates already cached in `wallet_watch`, so the poll loop makes one feed call rather than twenty stats calls. Wallet bookkeeping (refresh, discovery, cleanup) runs on its own `GMGN_MAINTENANCE_SECONDS` timer, after the stop-loss check — never before it.
 
@@ -57,7 +61,7 @@ Do not commit a generated multi-thousand-wallet snapshot blindly. Run it with th
 - Stake per entry: 0.025 SOL.
 - Trailing stop: +25% activation, 15% trail.
 - Emergency hard stop: -45%, full-position exit.
-- Max holding time defaults to 6h.
+- Max holding time defaults to 1h (`GMGN_MAX_HOLD_SECONDS`).
 - UTC timestamps and PnL are stored in SQLite and exposed through Telegram.
 
 ## Configuration
@@ -81,11 +85,11 @@ python gmgn/supervisor.py
 
 That starts the engine, the Telegram bot and the Mini App server together and restarts any of them that exits — a stopped engine is the expensive failure here, because open positions are not checked against their stops while it is down. Use `--no-bot` / `--no-webapp` / `--no-engine` to run a subset, or start the pieces individually with `python gmgn/run_engine.py`, `python gmgn/telegram_bot.py`, `python gmgn/webapp.py`.
 
-Telegram commands: `/status`, `/positions`, `/trades`, `/wallets`, `/weights`, `/config`.
+Telegram commands: `/status`, `/positions`, `/trades`, `/wallets`, `/weights`, `/attribution`, `/config`, `/help`.
 
 ## Telegram Mini App
 
-`python gmgn/webapp.py` serves a panel at <http://127.0.0.1:8770> with equity curve, live position P&L, trade history, the wallet pool and tokens approaching the entry threshold. It works in a plain browser as-is.
+`python gmgn/webapp.py` serves a panel at <http://127.0.0.1:8770> with equity curve, live position P&L, trade history, wallet P&L attribution, the wallet pool and tokens approaching the entry threshold. It works in a plain browser as-is, so long as there is no public origin — once there is, signing is required and a plain browser gets the panel's «нет доступа» screen rather than data.
 
 Telegram only opens Mini Apps over HTTPS, so the panel needs a public origin:
 
@@ -106,7 +110,7 @@ If you already have a domain or VPS, skip the tunnel and set `WEBAPP_PUBLIC_URL`
 
 Either way, a public origin turns on request signing: the API then requires valid Telegram `initData`, checked by HMAC against the bot token and pinned to `TELEGRAM_CHAT_ID`, so nobody else can read the panel through the tunnel.
 
-The API is read-only (`/api/overview`, `/api/trades`, `/api/wallets`, `/api/weights`, `/api/events`, `/api/equity`) and opens the database in SQLite read-only mode.
+The API is read-only (`/api/overview`, `/api/trades`, `/api/wallets`, `/api/weights`, `/api/attribution`, `/api/events`, `/api/equity`, `/api/health`) and opens the database in SQLite read-only mode. `/api/health` is the one endpoint exempt from signing — the tunnel probes it to confirm the origin really serves before the URL is handed out.
 
 ## Tests
 
