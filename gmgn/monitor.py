@@ -25,44 +25,54 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import config  # noqa: E402
+from paper_engine import _find_gmgn as pe_find_gmgn  # noqa: E402
+from paper_engine import gmgn_cli  # noqa: E402
+
 LOG = logging.getLogger("gmgn-monitor")
-DB_PATH = os.getenv("SENTINEL_DB", "sentinel.db")
-POLL_SECONDS = int(os.getenv("GMGN_POLL_SECONDS", "15"))
-STATS_TTL_SECONDS = int(os.getenv("GMGN_STATS_TTL_SECONDS", "900"))
-WINDOW_SECONDS = int(os.getenv("GMGN_CLUSTER_WINDOW_SECONDS", "1800"))
-MIN_WALLETS = int(os.getenv("GMGN_MIN_CLUSTER_WALLETS", "3"))
-MIN_WINRATE = float(os.getenv("GMGN_MIN_WINRATE", "0.70"))
-MIN_BUYS_30D = int(os.getenv("GMGN_MIN_BUYS_30D", "10"))
-MIN_REALIZED_PROFIT = float(os.getenv("GMGN_MIN_REALIZED_PROFIT_USD", "0"))
-FEED_LIMIT = int(os.getenv("GMGN_FEED_LIMIT", "200"))
+# Read through config.py so the repo-local .env applies here too, rather than requiring
+# these to be exported into the shell.
+DB_PATH = config.DB_PATH
+POLL_SECONDS = config.POLL_SECONDS
+STATS_TTL_SECONDS = config.get_int("GMGN_STATS_TTL_SECONDS", 900)
+WINDOW_SECONDS = config.CLUSTER_WINDOW
+MIN_WALLETS = config.get_int("GMGN_MIN_CLUSTER_WALLETS", 3)
+MIN_WINRATE = config.get_float("GMGN_MIN_WINRATE", 0.70)
+MIN_BUYS_30D = config.get_int("GMGN_MIN_BUYS_30D", 10)
+MIN_REALIZED_PROFIT = config.get_float("GMGN_MIN_REALIZED_PROFIT_USD", 0.0)
+FEED_LIMIT = config.FEED_LIMIT
 
 _stats_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 def run_cli(args: list[str]) -> Any:
-    command = ["gmgn-cli", *args, "--raw"]
+    """Delegates to the engine's shared gmgn_cli.
+
+    The local copy this replaced invoked a bare "gmgn-cli", which CreateProcess cannot
+    resolve on Windows (it needs the .cmd shim), decoded output with the locale codec so
+    any emoji in a token name raised UnicodeDecodeError, and passed no env, so it used
+    the machine-wide credentials rather than the project's .env.
+    """
     try:
-        proc = subprocess.run(command, capture_output=True, text=True, timeout=45)
+        return gmgn_cli(args)
     except FileNotFoundError as exc:
         raise RuntimeError("gmgn-cli is not installed: npm install -g gmgn-cli") from exc
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout).strip()
-        raise RuntimeError(f"gmgn-cli failed: {detail}")
-    lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-    if not lines:
-        raise RuntimeError("gmgn-cli returned an empty response")
-    return json.loads(lines[-1])
 
 
 def ensure_configured() -> None:
     try:
         proc = subprocess.run(
-            ["gmgn-cli", "config", "--check"], capture_output=True, text=True, timeout=20
+            [pe_find_gmgn(), "config", "--check"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=20, env=config.gmgn_env(),
         )
     except FileNotFoundError as exc:
         raise RuntimeError("gmgn-cli is not installed: npm install -g gmgn-cli") from exc
     if proc.returncode != 0:
-        raise RuntimeError("GMGN API key is not configured. Run: gmgn-cli config")
+        raise RuntimeError(
+            "GMGN API key is not configured. Run `gmgn-cli config --apply <key>`, "
+            "then `python gmgn/config.py --import-gmgn` to copy it into the project .env"
+        )
 
 
 def unwrap(value: Any) -> Any:

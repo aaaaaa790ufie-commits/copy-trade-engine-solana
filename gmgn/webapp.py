@@ -210,10 +210,14 @@ def api_overview() -> dict:
         best = max((r["pnl_pct"] for r in closed), default=0.0)
         worst = min((r["pnl_pct"] for r in closed), default=0.0)
 
+        # `active=1` means eligible to carry weight. Wallets parked at active=0 (too small
+        # a sample, or no recent buys) are counted separately rather than hidden, so the
+        # panel shows why the pool is smaller than the row count suggests.
         wallets = c.execute(
-            "SELECT COUNT(*) n, SUM(winrate>=0.70) elite, SUM(winrate>=0.50) active, "
+            "SELECT COUNT(*) n, SUM(winrate>=0.70) elite, SUM(winrate>=0.50) qualified, "
             "AVG(CASE WHEN winrate>0 THEN winrate END) avg FROM wallet_watch WHERE active=1"
         ).fetchone()
+        parked = c.execute("SELECT COUNT(*) FROM wallet_watch WHERE active=0").fetchone()[0]
 
         return {
             "balance_sol": a["budget_sol"] if a else 0.0,
@@ -235,7 +239,8 @@ def api_overview() -> dict:
             "worst_pct": worst * 100,
             "wallets_total": wallets["n"] or 0,
             "wallets_elite": wallets["elite"] or 0,
-            "wallets_active": wallets["active"] or 0,
+            "wallets_qualified": wallets["qualified"] or 0,
+            "wallets_parked": parked,
             "wallets_avg_winrate_pct": (wallets["avg"] or 0) * 100,
             "prices_age": int(time.time() - _prices_at) if _prices_at else None,
             "engine_alive": engine_alive(c),

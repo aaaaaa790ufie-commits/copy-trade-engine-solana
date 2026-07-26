@@ -23,7 +23,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
-from paper_engine import gmgn_cli, valid_address  # noqa: E402
+from paper_engine import _is_winrate_key, gmgn_cli, valid_address  # noqa: E402
 
 LOG = logging.getLogger("gmgn-mass-discovery")
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,11 +75,18 @@ def number(obj: dict[str, Any], *keys: str, default: float = 0.0) -> float:
             continue
         try:
             parsed = float(value)
-            if "winrate" in key.lower() and parsed > 1:
-                parsed /= 100
-            return parsed
         except (TypeError, ValueError):
             continue
+        # Underscores stripped before the check: "winrate" in "win_rate" is False, so a
+        # percentage under that spelling was never scaled and every such wallet sailed
+        # past --min-winrate. See paper_engine._is_winrate_key.
+        if _is_winrate_key(key):
+            if parsed > 1:
+                parsed /= 100
+            if not 0 <= parsed <= 1:
+                LOG.warning("ignoring out-of-range winrate %r from %s", value, key)
+                continue
+        return parsed
     return default
 
 def wallet_address(obj: dict[str, Any]) -> str:

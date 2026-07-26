@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import json, logging, os, shutil, sqlite3, subprocess, time
+import json, logging, os, re, shutil, sqlite3, subprocess, time
 from collections import defaultdict
 import config
 LOG=logging.getLogger("paper-engine")
@@ -39,15 +39,30 @@ def list_rows(x):
  if isinstance(x,dict) and isinstance(x.get("data"),dict): x=x["data"]
  if isinstance(x,dict) and isinstance(x.get("list"),list): x=x["list"]
  return x if isinstance(x,list) else ([x] if isinstance(x,dict) and x else [])
+def _is_winrate_key(k):
+ """True for winrate/win_rate/pnl_stat.win_rate alike.
+
+ The underscore matters: a plain `"winrate" in k` test is False for "win_rate", so a
+ percentage arriving under that spelling was never divided by 100. A wallet at 75%
+ became winrate=75.0, which cleared the >=0.90 elite gate, displayed as 7500% and
+ broke the small-sample check. GMGN currently sends "winrate", but the alternate
+ spellings exist precisely because the response shape has varied."""
+ return "winrate" in k.replace("_","").lower()
 def n(o,*keys):
  for k in keys:
   v=o
   for part in k.split("."): v=v.get(part) if isinstance(v,dict) else None
   if v is not None:
-   try: return float(v)/100 if "winrate" in k and float(v)>1 else float(v)
-   except (TypeError,ValueError): pass
+   try: f=float(v)
+   except (TypeError,ValueError): continue
+   if _is_winrate_key(k):
+    if f>1: f/=100
+    # Still out of range means the field is not what we think it is; a bogus win rate
+    # would silently promote a wallet to elite, so refuse it rather than store it.
+    if not 0<=f<=1:
+     LOG.warning("ignoring out-of-range winrate %r from %s",v,k); continue
+   return f
  return 0.0
-import re
 # Everything the feed returns is untrusted: it reaches the database and from there the
 # Mini App. Solana addresses are base58, 32-44 chars — anything else is rejected at the
 # boundary rather than stored and rendered later.

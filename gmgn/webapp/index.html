@@ -287,10 +287,11 @@ function viewOverview(){
     </div>
     <div class="sec-title">Пул кошельков</div>
     <div class="card">
-      <div class="row"><span class="sub">Всего отслеживается</span><b class="num">${d.wallets_total}</b></div>
+      <div class="row"><span class="sub">Активных в пуле</span><b class="num">${d.wallets_total}</b></div>
       <div class="row"><span class="sub">Winrate ≥ 70% (вес 0.25)</span><b class="num up">${d.wallets_elite}</b></div>
-      <div class="row"><span class="sub">Winrate ≥ 50%</span><b class="num">${d.wallets_active}</b></div>
+      <div class="row"><span class="sub">Winrate ≥ 50%</span><b class="num">${d.wallets_qualified}</b></div>
       <div class="row"><span class="sub">Средний winrate</span><b class="num">${d.wallets_avg_winrate_pct.toFixed(1)}%</b></div>
+      <div class="row"><span class="sub">На паузе (мало сделок / не покупают)</span><b class="num">${d.wallets_parked ?? 0}</b></div>
     </div>
     <div class="sec-title">Параметры движка</div>
     <div class="card">

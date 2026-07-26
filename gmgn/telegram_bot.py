@@ -272,7 +272,9 @@ def text(c: sqlite3.Connection, command: str) -> str:
         if not rs:
             return "Кошельки ещё не загружены."
         black = c.execute("SELECT COUNT(*) FROM wallet_blacklist").fetchone()[0]
-        out = [f"{r[0]}: всего {r[1]} · 90%+ {r[3]} · 70%+ {r[4]} · 50%+ {r[5]} · средний {(r[2] or 0)*100:.1f}%" for r in rs]
+        parked = c.execute("SELECT COUNT(*) FROM wallet_watch WHERE active=0").fetchone()[0]
+        out = [f"{r[0]}: активных {r[1]} · 90%+ {r[3]} · 70%+ {r[4]} · 50%+ {r[5]} · средний {(r[2] or 0)*100:.1f}%" for r in rs]
+        out.append(f"На паузе (мало сделок / не покупают): {parked}")
         out.append(f"В чёрном списке: {black}")
         return "\n".join(out)
 

@@ -726,6 +726,54 @@ class WebappPositionTests(unittest.TestCase):
         self.assertEqual(merged["a"], 5.0, "one bad poll must not blank the position")
 
 
+class WinrateParsingTests(unittest.TestCase):
+    """Win rate decides weight, elite status and blacklisting — it must parse exactly."""
+
+    def test_every_spelling_normalises_a_percentage(self):
+        # Regression: the scaling test was `"winrate" in key`, which is False for
+        # "win_rate". A wallet at 75% parsed as 75.0 — it cleared the >=0.90 elite gate,
+        # would render as 7500% in the panel, and broke the small-sample check.
+        for key in ("winrate", "win_rate", "pnl_stat.winrate", "pnl_stat.win_rate"):
+            with self.subTest(key=key):
+                payload = {}
+                node = payload
+                parts = key.split(".")
+                for part in parts[:-1]:
+                    node[part] = {}
+                    node = node[part]
+                node[parts[-1]] = 75
+                self.assertAlmostEqual(pe.n(payload, key), 0.75)
+
+    def test_fractions_pass_through(self):
+        self.assertAlmostEqual(pe.wr({"winrate": 0.62}), 0.62)
+        self.assertAlmostEqual(pe.wr({"win_rate": 0.62}), 0.62)
+
+    def test_one_hundred_percent_is_one(self):
+        self.assertEqual(pe.wr({"winrate": 100}), 1.0)
+        self.assertEqual(pe.wr({"winrate": 1}), 1.0)
+
+    def test_out_of_range_is_refused_not_stored(self):
+        # 5000 would become 50.0 — still nonsense, and it would promote the wallet.
+        self.assertEqual(pe.wr({"winrate": 5000}), 0.0)
+        self.assertEqual(pe.wr({"winrate": -3}), 0.0)
+
+    def test_non_winrate_keys_are_never_scaled(self):
+        self.assertEqual(pe.n({"buy": 75}, "buy"), 75.0)
+        self.assertEqual(pe.stamp({"timestamp": 1785000000}), 1785000000)
+        self.assertEqual(pe.px({"price_usd": 42}), 42.0)
+
+    def test_a_percentage_wallet_is_not_promoted_to_elite(self):
+        wrv = pe.wr({"win_rate": 75})
+        self.assertLess(wrv, 0.90, "75% must not clear the 90% elite gate")
+        self.assertEqual(pe.weight(wrv), 0.25)
+
+    def test_mass_discovery_agrees_with_the_engine(self):
+        import mass_discovery as md
+        for key in ("winrate", "win_rate"):
+            self.assertAlmostEqual(md.number({key: 75}, key), 0.75)
+            self.assertAlmostEqual(md.number({key: 0.75}, key), 0.75)
+
+
 class GmgnCliTests(unittest.TestCase):
     """The subprocess boundary to gmgn-cli, exercised with a real subprocess."""
 
