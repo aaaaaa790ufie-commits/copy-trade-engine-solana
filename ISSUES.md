@@ -9,7 +9,7 @@ Fixed issues are not listed here — they are in `PROGRESS.md` and the git histo
 
 ---
 
-## 1. 5551 wallets are blacklisted, an unknown share of them wrongly
+## 1. 5576 wallets are blacklisted, an unknown share of them wrongly
 
 **Status:** remediation written, not run. Needs approval.
 
@@ -19,8 +19,8 @@ Until `a2d7e16`, `refresh_wallet_stats` rewrote a wallet's win rate to a synthet
 discovery never re-adds a blacklisted address. A dormant wallet with an 80% win
 rate was therefore banned forever.
 
-The logic is fixed, but the damage is already in `sentinel.db`: 5551 blacklist
-rows against 1205 active watched wallets. The two causes are indistinguishable
+The logic is fixed, but the damage is already in `sentinel.db`: 5576 blacklist
+rows against 1188 active watched wallets (counts as of 2026-07-26 21:00). The two causes are indistinguishable
 after the fact — both are stored as `reason='low_winrate'` with no record of the
 win rate that triggered them.
 
@@ -38,37 +38,27 @@ unverified can enter the pool in the meantime.
 
 ---
 
-## 2. The strategy loses money, and the account is nearly out of runway
+## 2. Whether eleven trades justify any conclusion at all
 
-**Status:** reported, no action taken. Needs a decision, and fairly soon.
+**Status:** two of the three decisions have been taken. The third stands.
 
-As of 2026-07-26 18:15 UTC the paper account stands at **0.0311 SOL equity** against
-an initial 0.1 — down 68.9% — across 11 closed trades, 5 winners and 6 losers.
-Free balance is **0.0139 SOL against a 0.025 stake**, so once the open position
-closes the engine will have too little to open another and will simply idle. The
-panel already reports `БЕЗ СВОБОДНЫХ СРЕДСТВ`.
+Two changes were made on the operator's instruction on 2026-07-26:
 
-The engine now does what it was specified to do — the earlier −99.99% exits were a
-real defect and are fixed — but doing it correctly is still unprofitable at these
-settings.
+* `GMGN_ENTRY_SCORE` raised from 0.25 to **1.0**, and the weight ladder given a 1.0
+  tier at 90% and 0.5 at 80–90%. Entry now needs one wallet at 90%+, or two at 80–90%,
+  or four at 70–80%. Under the old pairing a single 70% wallet was a full signal and
+  every entry fired on `wallets=1`, so "weighted convergence" never converged. 155 of
+  1188 watched wallets can now enter alone, against 318 before.
+* The account was **settled and restored to 0.1 SOL** (`gmgn/reset_account.py`). The
+  top-up raised `initial_budget_sol` by the same amount, so lifetime P&L still reads
+  −0.06899 rather than pretending the loss did not happen, and `reset_at` lets both the
+  panel and `/status` report the new settings' results separately.
 
-The dominant parameter is `GMGN_ENTRY_SCORE=0.25`, which is exactly the weight of a
-single wallet at 70%+. "Weighted convergence" therefore reduces to "follow one
-wallet", with no convergence required at all — every entry so far was triggered by
-`wallets=1`. Raising it to 0.3125 would require one 70% wallet plus one 50%+ wallet;
-0.5 would require two 70% wallets.
-
-**Three separate decisions, none of which are mine to make:**
-
-1. Raise `GMGN_ENTRY_SCORE` so convergence actually means convergence.
-2. Reset the paper account to a fresh budget, so the next configuration is measured
-   from a clean start rather than from a depleted one.
-3. Whether 11 trades justifies changing anything at all — it does not, statistically.
-   The honest read is that the sample is too small to distinguish a bad strategy from
-   an unlucky one, and the fix for that is more trades, not more tuning.
-
-**Not done automatically because** entry threshold, stake, stop distances and the
-account balance were explicitly placed off-limits without approval.
+**What remains undecided, and is the substantive point:** eleven closed trades cannot
+distinguish a bad strategy from an unlucky one. The changes above are defensible on
+reasoning — a threshold equal to a single wallet's weight is not convergence by any
+reading — but they are not yet *evidenced*, and neither was the configuration they
+replaced. The remedy is more trades, not more tuning. Resist re-tuning on the next ten.
 
 ### Update 2026-07-26: the 1 h cap is supported by the historical data
 
