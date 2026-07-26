@@ -1391,3 +1391,73 @@ the parser cannot drift apart again.
 Общая закономерность прохода: искал не в коде, а в *покрытии*, и все крупные находки
 оказались в файлах, у которых тестов не было вовсе. Счётчик чистых проходов остаётся
 **0**. Продолжаю Pass 22.
+
+## Pass 22 — auditing my own Pass 21, then the files nothing points at
+
+Two lenses. First the rule recorded after Pass 20 — my own recent code gets the same
+scrutiny as inherited code — applied to Pass 21's changes. Then a test for a
+project-wide invariant `CLAUDE.md` states and nothing enforced, which found a file
+twenty-one passes had never opened.
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 84 | High | Pass 21 made `reset_account.py`'s adjustment signed, so `initial_budget_sol` can now reach zero or below. `equity / initial - 1` predates that and **flips the sign**: a real +0.20 SOL gain rendered as −133.33% | `None` when there is no positive base; the panel prints SOL alone | `bb15834` |
+| 85 | Medium | `mass_discovery._cli_retry` caught only `RuntimeError`. A **hung** CLI raises `subprocess.TimeoutExpired`, a `SubprocessError` — the one failure a retry exists for was the one it never retried, and the two calls that begin a run had no guard | Retry any subprocess failure; guard both feeds | `c72a54b` |
+| 86 | Medium | `monitor.produce_signals` filtered feed rows on `maker` being **truthy**, then persisted it. `<img src=x onerror=alert(1)>` and `'; DROP TABLE wallet_scores; --` both pass a truthiness test | Validated with `valid_address` before persisting | `c72a54b` |
+| 87 | Low | `mass_discovery.py` and `monitor.py` never called `config.use_utf8_stdio()` — the invariant every other entrypoint honours | Both call it; a test now enforces it | `c72a54b` |
+
+### 84 came from re-reading my own fix, not from a failure
+
+Pass 21 fixed a real bug in `reset_account.py` and introduced the conditions for this
+one in the same edit. The old clamp meant `initial_budget_sol` could only grow, which is
+the assumption `equity / initial - 1` was written under; removing the clamp invalidated
+it silently, three files away. Reproduced before fixing:
+
+```
+balance +0.05000   initial -0.15000
+total_pnl_sol  +0.20000     <- correct
+total_pnl_pct  -133.33%     <- a real gain, rendered as a loss
+```
+
+A wrong-signed percentage is worse than no percentage, so the API returns `None` and the
+panel omits it. The SOL figures were never wrong and still aren't.
+
+### The invariant test found a file, not just a defect
+
+`test_every_entrypoint_sets_up_utf8_stdio` was written to pin `mass_discovery.py`. It
+failed on `gmgn/monitor.py` — a module nothing imports, nothing starts, and no pass had
+read. Reading it produced 86. Pulling that thread found `dashboard/`, `discovery/`,
+`scorer/` and a whole Rust workspace in the same condition.
+
+Established rather than assumed: `gmgn_signals`, the table `monitor.py` exists to write,
+**does not exist in `sentinel.db`** — it has never run here. `dashboard/app.py` needs
+`streamlit`, which is **not installed**. Both are recorded in `ISSUES.md` #7 as a scope
+decision for the operator; deleting a Rust engine on the inference that it is abandoned
+is not mine to make. The defects found in that code were fixed regardless — "probably
+dead" is not "dead".
+
+### Checked and found clean
+
+- Every other division by `initial_budget_sol` in the repo — there is exactly one, and
+  it is the one fixed.
+- The engine's own timeout handling. `token_price`, `get_stats` and `cycle`'s feed call
+  all catch `Exception`, so `TimeoutExpired` was only ever unhandled in the offline
+  collector.
+
+```
+$ python -m unittest discover -s gmgn -p 'test_*.py'
+Ran 227 tests in 12.339s
+OK
+```
+
+Live check of the restart path fixed in Pass 21, by killing the webapp child:
+
+```
+22:42:45,491 WARNING webapp exited with code 1 after 632s — restart #1 in 3s
+22:42:48,515 INFO    starting webapp                       ← 3.02s, as scheduled
+[engine] 22:42:33 [cycle] … / [engine] 22:42:54 [cycle] …  ← never interrupted
+```
+
+**Уверенность: средне-высокая.** Pass 22 не чист — 4 находки. Одна из них в коде,
+который я написал в Pass 21, что подтверждает правило после Pass 20 в третий раз.
+Счётчик чистых проходов остаётся **0**. Продолжаю Pass 23.
