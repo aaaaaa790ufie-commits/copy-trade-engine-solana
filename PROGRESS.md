@@ -1584,3 +1584,76 @@ existing row alone). Bot restarted onto the throttle at 23:04:48.
 
 **Уверенность: средне-высокая.** Pass 24 не чист — 2 находки. Счётчик чистых проходов
 остаётся **0**.
+
+## Pass 25 — three findings, one of which was silently throwing away the pool
+
+Lens: the previous pass's own code first (fourth pass running, fourth time it paid),
+then the parts of the engine whose behaviour is only visible in aggregate over hours —
+which is why nothing had looked at them.
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 94 | Medium | Pass 24's throttle recorded a send at the moment it *decided* to send. `push_events` leaves the cursor put on a failure so the event retries — but the retry pass found the kind throttled, skipped it, and moved the cursor past. **The message was dropped by the code whose comment promises a retry** | `due_for_push` made pure; `mark_pushed` called only after the send | `a6c79c2` |
+| 95 | Medium | `auto` reconnects hourly when the free pinggy session expires, and re-ran the whole cloudflared attempt each time on a network `CLAUDE.md` documents as unable to use it. **90 of the 93 seconds the panel was down went to rediscovering a known failure** | Last working provider tried first; others still fall back | `35a7007` |
+| 96 | **High** | The stats refresh queue was ordered by `updated_at` alone. Discovery inserts with `updated_at=now`, so a **never-scored** wallet sorted *last* — 3.3 h to reach the front, while `cleanup_wallets` deletes an unscored wallet after 1 h | Never-scored first, then longest-stale | `41fbf5a` |
+
+### 96: the engine was discovering wallets and deleting them unscored
+
+Measured on the live database, not inferred:
+
+```
+wallets queued ahead of a freshly discovered one : 1204
+throughput                                       : 60 per 10-minute pass
+time to reach the front                          : 3.3 h
+cleanup_wallets deletes an unscored wallet after : 1 h
+```
+
+Of the 60 wallets the next pass would have queried, **0 were unscored and 60 were
+re-checks of wallets that already had a usable rate**. The pool count drifting between
+1242 and 1275 across restarts — which I had been reading as ordinary churn for several
+passes — was this.
+
+Both orderings run against one fixture: old queried 0 of 3 newcomers, new queried 3 of
+3. On live data the change turns 0/60 unscored into 60/60, clearing a 65-wallet backlog
+in two passes instead of never. It costs nothing — same batch cap, same API budget — and
+is the better order regardless: an unscored wallet carries no weight and is invisible to
+the strategy, while one whose rate is three hours old is still perfectly usable.
+
+### What that measurement also exposed, and what I did not do about it
+
+Refresh throughput is 60 wallets per 10-minute pass — 360/h — against ~1240 wallets on a
+1 h TTL. It cannot keep up by ~3.5×, so entry weights are computed from win rates that
+are mostly a day old:
+
+| Age of the win rate carrying weight | Wallets |
+|---|---:|
+| under 1 h | 37 |
+| 1 h – 24 h | 227 |
+| **over 24 h** | **913** |
+
+Raising `GMGN_STATS_BATCH_MAX` buys freshness with stop-loss latency, and that cap
+exists because a 20-round-trip sweep once delayed stops by tens of minutes and produced
+two −99.99% exits. Trading a previously-realised risk to capital for an accuracy gain is
+the operator's call, so it is `ISSUES.md` #8 rather than a commit.
+
+`CLAUDE.md` claimed `refresh_wallet_stats` "keeps those values current". It does not,
+and now says so with the numbers.
+
+### 94 was a shape problem, not an oversight
+
+A predicate that mutates. `due_for_push` answered *and* recorded, so asking cost
+something, and the only caller asked before an operation that could fail. Reproduced
+against an API that fails once — delivered 0 before, 1 after — then split into a pure
+predicate and an explicit `mark_pushed`.
+
+```
+$ python -m unittest discover -s gmgn -p 'test_*.py'
+Ran 248 tests in 13.486s
+OK
+```
+
+Stack relaunched onto all three: engine cycling 4 s after start, webapp `auth required`
+from its first request, tunnel published on the first attempt at 00:15:16.
+
+**Уверенность: средне-высокая.** Pass 25 не чист — 3 находки, одна серьёзная и найденная
+только измерением live-базы, а не чтением кода. Счётчик чистых проходов **0**.
