@@ -399,11 +399,17 @@ def record_signal_strength(c,now,latest,weights):
  c.execute("DELETE FROM signal_history WHERE event_ts<?",(now-SIGNAL_HISTORY_HOURS*3600,))
  return best
 def signal_summary(c,now=None):
- """How near the engine has been to entering, over the retained window."""
+ """How near the engine has been to entering, over the retained window.
+
+ Windowed in the query, not by trusting that pruning has run. Only the engine prunes,
+ and only while it is cycling; the bot and the panel read through read-only connections.
+ Counting the whole table meant that with the engine stopped — precisely when the
+ operator looks — a day-old signal was reported as current."""
  now=int(now or time.time())
- row=c.execute("SELECT COUNT(*),MAX(best_score),AVG(best_score) FROM signal_history").fetchone()
+ cutoff=now-SIGNAL_HISTORY_HOURS*3600
+ row=c.execute("SELECT COUNT(*),MAX(best_score),AVG(best_score) FROM signal_history WHERE event_ts>=?",(cutoff,)).fetchone()
  cycles,best,avg=(row or (0,None,None))
- reached=c.execute("SELECT COUNT(*) FROM signal_history WHERE best_score>=?",(ENTRY,)).fetchone()[0]
+ reached=c.execute("SELECT COUNT(*) FROM signal_history WHERE event_ts>=? AND best_score>=?",(cutoff,ENTRY)).fetchone()[0]
  return {"cycles":cycles or 0,"best_score":best or 0.0,"mean_score":avg or 0.0,
          "cycles_at_threshold":reached or 0,"entry_score":ENTRY,
          "window_hours":SIGNAL_HISTORY_HOURS}
@@ -507,13 +513,27 @@ def last_feed_ts(c):
   row=c.execute("SELECT updated_at FROM engine_state WHERE key='last_feed_ok'").fetchone()
   return row[0] if row else 0
  except sqlite3.OperationalError: return 0
+def feed_failures(c):
+ """Cycles since the feed last returned anything. 0 means the last poll worked."""
+ try:
+  row=c.execute("SELECT value FROM engine_state WHERE key='feed_failures'").fetchone()
+  return int(row[0]) if row and str(row[0]).isdigit() else 0
+ except sqlite3.OperationalError: return 0
 def feed_is_fresh(c,now=None):
  """False when the loop is cycling but the feed has returned nothing for a while.
 
- Reported separately from liveness so "running" cannot be mistaken for "working"."""
+ Reported separately from liveness so "running" cannot be mistaken for "working".
+
+ Driven by a consecutive-failure count rather than the age of the last success. The
+ age alone cannot tell "just started" from "never worked once": with no success ever
+ recorded there is no timestamp to be old, so an engine cycling for hours against a
+ permanently broken feed reported itself healthy — precisely the case this exists to
+ catch."""
+ window=max(FEED_STALE_AFTER,POLL*6)
+ if feed_failures(c)*max(POLL,1)>=window: return False
  last=last_feed_ts(c)
- if not last: return True   # nothing recorded yet; do not cry wolf on a fresh database
- return (now or time.time())-last < max(FEED_STALE_AFTER,POLL*6)
+ if not last: return True   # nothing has run long enough yet to judge
+ return (now or time.time())-last<window
 def last_cycle_ts(c):
  """Unix ts of the last completed cycle, 0 if the engine has never run.
 
@@ -594,6 +614,10 @@ def cycle(c):
  # not have entered or priced anything.
  if got_feed:
   c.execute("INSERT INTO engine_state(key,value,updated_at) VALUES('last_feed_ok',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(str(now),now))
+  c.execute("INSERT INTO engine_state(key,value,updated_at) VALUES('feed_failures','0',?) ON CONFLICT(key) DO UPDATE SET value='0',updated_at=excluded.updated_at",(now,))
+ else:
+  # Counted rather than timed, so a feed that has never once worked is still detectable.
+  c.execute("INSERT INTO engine_state(key,value,updated_at) VALUES('feed_failures','1',?) ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT),updated_at=excluded.updated_at",(now,))
  c.commit()
  LOG.info("[cycle] %.1fs wallets=%d open=%d",time.time()-now,c.execute("SELECT COUNT(*) FROM wallet_watch").fetchone()[0],c.execute("SELECT COUNT(*) FROM paper_positions WHERE status='open'").fetchone()[0])
 MAX_CYCLE_FAILURES=config.get_int("GMGN_MAX_CYCLE_FAILURES",5)

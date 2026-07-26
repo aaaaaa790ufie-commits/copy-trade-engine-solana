@@ -1867,6 +1867,24 @@ class SignalReachTests(unittest.TestCase):
         self._cycle_at(c, NOW + 2, pe.ENTRY)
         self.assertEqual(pe.signal_summary(c)["cycles_at_threshold"], 2)
 
+    def test_the_window_holds_even_when_pruning_has_not_run(self):
+        """Only the engine prunes, and only while cycling. The bot and the panel read
+        through read-only connections, so with the engine stopped — precisely when the
+        operator looks — counting the whole table reported a day-old signal as current.
+        """
+        c = fresh_db()
+        stale = NOW - pe.SIGNAL_HISTORY_HOURS * 3600 - 600
+        c.execute("INSERT INTO signal_history VALUES(?,?,?)", (stale, pe.ENTRY, 5))
+        c.execute("INSERT INTO signal_history VALUES(?,?,?)", (NOW, 0.0625, 2))
+
+        s = pe.signal_summary(c, now=NOW)
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM signal_history").fetchone()[0], 2,
+                         "the stale row is still on disk")
+        self.assertEqual(s["cycles"], 1, "but only the one inside the window counts")
+        self.assertAlmostEqual(s["best_score"], 0.0625)
+        self.assertEqual(s["cycles_at_threshold"], 0,
+                         "a threshold reached yesterday is not one reached today")
+
     def test_history_is_pruned_to_the_window(self):
         c = fresh_db()
         old = NOW - pe.SIGNAL_HISTORY_HOURS * 3600 - 60
@@ -1970,6 +1988,40 @@ class FeedHealthTests(unittest.TestCase):
         pe.cycle(c)
         self.assertEqual(pe.last_feed_ts(c), recorded, "a failed poll must not count as success")
         self.assertGreaterEqual(pe.last_cycle_ts(c), recorded, "but the loop still heartbeats")
+
+    def test_a_feed_that_never_worked_is_detected(self):
+        """The age of the last success cannot tell "just started" from "never worked".
+
+        With no success ever recorded there is no timestamp to be old, so the original
+        check returned True unconditionally — an engine cycling for hours against a
+        permanently broken feed reported itself healthy, which is the case the whole
+        feature exists to catch.
+        """
+        c = fresh_db()
+        pe.cli = lambda args: []          # answers, but never with anything
+        needed = max(pe.FEED_STALE_AFTER, pe.POLL * 6) // max(pe.POLL, 1)
+
+        for _ in range(needed - 1):
+            pe.cycle(c)
+        self.assertEqual(pe.last_feed_ts(c), 0, "nothing ever succeeded")
+        self.assertTrue(pe.feed_is_fresh(c), "not yet long enough to judge")
+
+        for _ in range(3):
+            pe.cycle(c)
+        self.assertFalse(pe.feed_is_fresh(c), "long enough now, and still nothing")
+
+    def test_one_success_clears_the_failure_count(self):
+        c = fresh_db()
+        pe.cli = lambda args: []
+        for _ in range(5):
+            pe.cycle(c)
+        self.assertEqual(pe.feed_failures(c), 5)
+
+        pe.cli = lambda args: [self._trade()] if args[:2] == ["track", "smartmoney"] else {}
+        pe.token_price = lambda ch, m: 1.0
+        pe.cycle(c)
+        self.assertEqual(pe.feed_failures(c), 0)
+        self.assertTrue(pe.feed_is_fresh(c))
 
     def test_a_prolonged_outage_reads_as_stale(self):
         c = fresh_db()
