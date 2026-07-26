@@ -185,23 +185,25 @@ function renderHero(d){
   const b = hero.querySelector(".badge");
   b.className = "badge " + badge[0]; b.textContent = badge[1];
 
-  const C = d.current || {}, L = d.lifetime || {};
-  const both = (now, all, fmt) => d.reset_at
-    ? `${fmt(now)}<span class="sub" style="font-weight:400"> (${fmt(all)})</span>`
-    : fmt(all);
+  const C = d.current || {};
+  const elite = ((d.config?.elite_winrate ?? 0.9) * 100).toFixed(0);
   document.getElementById("stats").innerHTML = [
     ["Свободно", d.balance_sol.toFixed(4), ""],
     ["В позициях", d.open_value_sol.toFixed(4), ""],
     ["Позиций", String(d.open_positions), ""],
-    ["Винрейт", both(C, L, s => s.closed ? s.winrate_pct.toFixed(0)+"%" : "—"),
+    ["Винрейт", pair(d, s => s.closed ? s.winrate_pct.toFixed(0)+"%" : "—"),
       C.closed ? (C.winrate_pct>=50?"up":"down") : ""],
-    ["W / L", both(C, L, s => `${s.wins}/${s.losses}`), ""],
-    ["Кошельки 90%+", String(d.wallets_elite), ""],
+    ["W / L", pair(d, s => `${s.wins}/${s.losses}`), ""],
+    // Threshold read from the engine, not spelled out here — it moved from 70% to 90%
+    // once already, and the hardcoded copies were what went stale.
+    [`Кошельки ${elite}%+`, String(d.wallets_elite), ""],
   ].map(([label,val,c]) => `<div class="stat"><b class="${c}">${val}</b><span>${label}</span></div>`).join("");
 }
 
 /* Current settings first, lifetime in parentheses. Before any reset there is only one
-   period, so the parenthetical is omitted rather than repeating the same number. */
+   period, so the parenthetical is omitted rather than repeating the same number.
+   One helper for the whole page: the hero and the results card had grown separate
+   versions with different signatures and different fallbacks. */
 function pair(d, fmt){
   const cur = fmt(d.current || d.lifetime || {});
   if (!d.reset_at) return cur;
@@ -407,7 +409,7 @@ async function viewAttribution(){
     }).join("") + `</div>
     <div class="card"><div class="row"><span class="sub">Итого по показанным</span>
       <b class="num ${cls(total_sol)}">${total_sol>=0?"+":""}${fmtSol(total_sol)} SOL</b></div></div>
-    <div class="sub" style="padding:0 6px">Доля кошелька в сделке равна его весу, делённому на общий счёт сигнала: одиночный вход кошелька 90%+ полностью его, один из четырёх — четверть.</div>`;
+    <div class="sub" style="padding:0 6px">Доля кошелька в сделке равна его весу, делённому на общий счёт сигнала: одиночный вход кошелька ${((overview?.config?.elite_winrate ?? 0.9)*100).toFixed(0)}%+ полностью его, один из четырёх — четверть.</div>`;
 }
 
 async function viewWeights(){

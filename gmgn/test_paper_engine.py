@@ -1888,6 +1888,51 @@ class PeriodSplitTests(unittest.TestCase):
         self.assertEqual(d["current"], d["lifetime"], "nothing to bracket without a reset")
 
 
+class PanelContractTests(unittest.TestCase):
+    """Fields the panel reads must be present, or a label silently falls back.
+
+    The page derives its thresholds from config rather than spelling them out, because
+    the hardcoded copies are exactly what went stale when the ladder moved from 70% to
+    90%. That only works if the API keeps sending them.
+    """
+
+    def setUp(self):
+        import webapp
+        self.webapp = webapp
+
+    def _overview(self):
+        c = fresh_db()
+        c.row_factory = sqlite3.Row
+        original = self.webapp.db
+        self.webapp.db = lambda: _NonClosing(c)
+        try:
+            return self.webapp.api_overview()
+        finally:
+            self.webapp.db = original
+
+    def test_config_block_carries_what_the_page_renders(self):
+        cfg = self._overview()["config"]
+        for key in ("entry_score", "stake_sol", "hard_stop_pct", "trailing_activate_pct",
+                    "trailing_distance_pct", "max_hold_hours", "chains", "poll_seconds",
+                    "elite_winrate", "min_weighted_winrate"):
+            self.assertIn(key, cfg, f"the panel reads config.{key}")
+
+    def test_thresholds_match_the_engine(self):
+        cfg = self._overview()["config"]
+        self.assertEqual(cfg["elite_winrate"], pe.ELITE_WINRATE)
+        self.assertEqual(cfg["min_weighted_winrate"], pe.MIN_WEIGHTED_WINRATE)
+        self.assertEqual(cfg["entry_score"], pe.ENTRY)
+
+    def test_both_periods_are_always_present(self):
+        d = self._overview()
+        for key in ("current", "lifetime", "reset_at", "current_pnl_sol", "current_base_sol"):
+            self.assertIn(key, d, f"the panel reads {key}")
+        for period in ("current", "lifetime"):
+            for key in ("closed", "wins", "losses", "winrate_pct", "realized_sol",
+                        "best_pct", "worst_pct"):
+                self.assertIn(key, d[period], f"{period}.{key}")
+
+
 class EveryEndpointTests(unittest.TestCase):
     """Call every route for real. No test did, and a 500 shipped because of it.
 
