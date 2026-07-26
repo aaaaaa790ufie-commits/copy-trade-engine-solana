@@ -114,10 +114,15 @@ def main() -> None:
         print()
 
         after = bal + open_stake + pnl
+        # Signed, and applied to initial_budget_sol either way. A reset on a *profitable*
+        # account moves money out, and clamping at zero left initial untouched while the
+        # balance dropped to the target — so a +0.1 SOL gain reported as break-even and
+        # the conservation check below printed False, after the write had committed.
+        # Adding money must not look like profit; removing it must not erase profit.
         deposit = args.target - after
         print(f"balance after closing   {after:.5f} SOL")
-        print(f"top-up to reach target  {deposit:+.5f} SOL")
-        print(f"initial raised to       {initial + max(0.0, deposit):.5f} SOL"
+        print(f"{'top-up' if deposit >= 0 else 'withdrawal'} to reach target  {deposit:+.5f} SOL")
+        print(f"initial adjusted to     {initial + deposit:.5f} SOL"
               "   (so cumulative P&L stays honest)")
 
         if not args.apply:
@@ -125,14 +130,15 @@ def main() -> None:
             return
 
         c.execute("UPDATE paper_account SET budget_sol=?,initial_budget_sol=?,bankrupt=0,updated_at=? "
-                  "WHERE id=1", (args.target, initial + max(0.0, deposit), now))
+                  "WHERE id=1", (args.target, initial + deposit, now))
         # Recorded so the panel and /status can report performance since this point,
         # separately from lifetime P&L.
         c.execute("INSERT INTO engine_state(key,value,updated_at) VALUES('reset_at',?,?) "
                   "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
                   (str(now), now))
-        if deposit > 0:
-            pe.emit(c, "DEPOSIT", f"пополнение {deposit:+.5f} SOL — баланс восстановлен до {args.target:.5f}")
+        if abs(deposit) > 1e-9:
+            word = "пополнение" if deposit > 0 else "вывод"
+            pe.emit(c, "DEPOSIT", f"{word} {deposit:+.5f} SOL — баланс приведён к {args.target:.5f}")
         c.commit()
 
         bal2, init2 = c.execute(

@@ -1690,6 +1690,64 @@ class ResetAccountTests(unittest.TestCase):
         self.assertAlmostEqual(bal, 0.075 + 0.025 - 0.0125)
         self.assertAlmostEqual(bal, initial + realised, msg="money must stay conserved")
 
+    def _run_reset(self, balance, initial, realised, target):
+        """Seed an account, run the script for real against it, return the books after.
+
+        Through main() and a subprocess, because the bug this pins was in main()'s
+        arithmetic: close_all() was already covered and was never wrong.
+        """
+        import subprocess
+        db = pathlib.Path(tempfile.mkdtemp()) / "reset.db"
+        c = sqlite3.connect(db)
+        pe.init(c)
+        c.execute("UPDATE paper_account SET budget_sol=?,initial_budget_sol=? WHERE id=1",
+                  (balance, initial))
+        c.execute("INSERT INTO paper_trades(token_mint,chain,action,price,stake_sol,pnl_sol,"
+                  "pnl_pct,reason,wallet_count,signal_score,event_ts) "
+                  "VALUES('M','sol','EXIT',1,0.025,?,0.0,'seed',1,1.0,1)", (realised,))
+        c.commit()
+        c.close()
+        out = subprocess.run(
+            [sys.executable, str(pathlib.Path(pe.__file__).with_name("reset_account.py")),
+             "--apply", "--no-backup", "--target", str(target), "--db-path", str(db)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        c = sqlite3.connect(db)
+        try:
+            bal, init = c.execute(
+                "SELECT budget_sol,initial_budget_sol FROM paper_account WHERE id=1").fetchone()
+            real = c.execute(
+                "SELECT COALESCE(SUM(pnl_sol),0) FROM paper_trades WHERE action='EXIT'").fetchone()[0]
+        finally:
+            c.close()
+        return bal, init, real
+
+    def test_a_top_up_does_not_read_as_profit(self):
+        # Lost 0.06 of 0.1 and topped back up: the injection must raise initial by the
+        # same amount, or equity - initial reports break-even on real losses.
+        bal, init, real = self._run_reset(balance=0.04, initial=0.1, realised=-0.06, target=0.1)
+        self.assertAlmostEqual(bal, 0.1)
+        self.assertAlmostEqual(init, 0.16)
+        self.assertAlmostEqual(bal - init, -0.06, msg="the loss must survive the top-up")
+        self.assertAlmostEqual(bal, init + real, msg="money must stay conserved")
+
+    def test_a_withdrawal_does_not_erase_profit(self):
+        # The mirror image, and the one that was wrong: resetting a profitable account
+        # to target moves money out. Clamping the adjustment at zero left initial alone,
+        # so a +0.1 gain reported as break-even — and the script's own conservation
+        # check printed False, after it had already committed.
+        bal, init, real = self._run_reset(balance=0.2, initial=0.1, realised=0.1, target=0.1)
+        self.assertAlmostEqual(bal, 0.1)
+        self.assertAlmostEqual(init, 0.0)
+        self.assertAlmostEqual(bal - init, 0.1, msg="the gain must survive the withdrawal")
+        self.assertAlmostEqual(bal, init + real, msg="money must stay conserved")
+
+    def test_hitting_the_target_exactly_changes_nothing(self):
+        bal, init, real = self._run_reset(balance=0.1, initial=0.1, realised=0.0, target=0.1)
+        self.assertAlmostEqual(bal, 0.1)
+        self.assertAlmostEqual(init, 0.1)
+        self.assertAlmostEqual(bal, init + real)
+
     def test_a_cooldown_is_set_like_every_other_exit(self):
         # Without it the engine could re-buy the token it just settled on the next poll,
         # while the triggering buy is still inside the cluster window.
