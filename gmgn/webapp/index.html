@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Sentinel</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{
+  --bg:var(--tg-theme-bg-color,#0f1115);
+  --card:var(--tg-theme-secondary-bg-color,#181b22);
+  --text:var(--tg-theme-text-color,#e8eaed);
+  --muted:var(--tg-theme-hint-color,#8b93a1);
+  --accent:var(--tg-theme-button-color,#3b82f6);
+  --accent-text:var(--tg-theme-button-text-color,#fff);
+  --line:color-mix(in srgb, var(--muted) 22%, transparent);
+  --up:#26a96a; --down:#e5484d; --warn:#e8a33d;
+  --r:14px;
+}
+@media (prefers-color-scheme: light){
+  :root{ --bg:var(--tg-theme-bg-color,#f2f3f7); --card:var(--tg-theme-secondary-bg-color,#fff);
+         --text:var(--tg-theme-text-color,#12141a); --muted:var(--tg-theme-hint-color,#707684); }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  padding:0 0 calc(84px + env(safe-area-inset-bottom));-webkit-font-smoothing:antialiased}
+.wrap{max-width:720px;margin:0 auto;padding:12px}
+
+/* ---------- header ---------- */
+.hero{background:var(--card);border-radius:var(--r);padding:16px;margin-bottom:10px}
+.hero-top{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
+.equity{font-size:32px;font-weight:700;letter-spacing:-.5px;font-variant-numeric:tabular-nums}
+.equity small{font-size:15px;font-weight:600;color:var(--muted);margin-left:4px}
+.pnl{font-size:15px;font-weight:600;font-variant-numeric:tabular-nums;margin-top:2px}
+.badge{font-size:11px;font-weight:700;padding:4px 9px;border-radius:99px;letter-spacing:.4px;white-space:nowrap}
+.badge.live{background:color-mix(in srgb,var(--up) 20%,transparent);color:var(--up)}
+.badge.dead{background:color-mix(in srgb,var(--down) 20%,transparent);color:var(--down)}
+.badge.warn{background:color-mix(in srgb,var(--warn) 20%,transparent);color:var(--warn)}
+.spark{width:100%;height:44px;margin-top:12px;display:block;overflow:visible}
+
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}
+.stat{background:color-mix(in srgb,var(--muted) 8%,transparent);border-radius:10px;padding:9px 10px}
+.stat b{display:block;font-size:16px;font-weight:650;font-variant-numeric:tabular-nums;letter-spacing:-.2px}
+.stat span{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+
+/* ---------- tabs ---------- */
+nav{position:fixed;left:0;right:0;bottom:0;z-index:20;background:var(--card);
+  border-top:1px solid var(--line);display:flex;padding:6px 4px calc(6px + env(safe-area-inset-bottom))}
+nav button{flex:1;background:none;border:0;color:var(--muted);font:inherit;font-size:10.5px;font-weight:600;
+  padding:6px 2px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:3px;border-radius:10px}
+nav button svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+nav button.on{color:var(--accent)}
+
+/* ---------- cards ---------- */
+.card{background:var(--card);border-radius:var(--r);padding:13px 14px;margin-bottom:8px}
+.card-h{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px}
+.mint{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;font-weight:600}
+.sub{font-size:12px;color:var(--muted)}
+.num{font-variant-numeric:tabular-nums}
+.up{color:var(--up)} .down{color:var(--down)} .warn{color:var(--warn)}
+.big{font-size:19px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.3px}
+.kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(84px,1fr));gap:7px;margin-top:9px}
+.kv div{font-size:12px}
+.kv span{display:block;color:var(--muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.4px}
+.bar{height:5px;border-radius:99px;background:color-mix(in srgb,var(--muted) 22%,transparent);overflow:hidden;margin-top:9px}
+.bar i{display:block;height:100%;border-radius:99px;transition:width .4s ease}
+.sec-title{font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.7px;margin:14px 4px 7px}
+.empty{text-align:center;color:var(--muted);padding:34px 16px;font-size:14px}
+.row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line)}
+.row:last-child{border-bottom:0}
+.tag{font-size:10px;font-weight:700;padding:2px 7px;border-radius:6px;letter-spacing:.3px}
+.tag.entry{background:color-mix(in srgb,var(--accent) 22%,transparent);color:var(--accent)}
+.tag.exit{background:color-mix(in srgb,var(--muted) 20%,transparent);color:var(--muted)}
+a.link{color:var(--accent);text-decoration:none}
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(78px + env(safe-area-inset-bottom));
+  background:var(--down);color:#fff;padding:8px 15px;border-radius:99px;font-size:12.5px;font-weight:600;
+  z-index:40;opacity:0;pointer-events:none;transition:opacity .25s;max-width:90vw;text-align:center}
+.toast.show{opacity:1}
+.skel{height:13px;border-radius:6px;background:color-mix(in srgb,var(--muted) 16%,transparent);animation:p 1.3s ease-in-out infinite}
+@keyframes p{50%{opacity:.45}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hero" id="hero">
+    <div class="hero-top">
+      <div>
+        <div class="equity"><span class="skel" style="display:inline-block;width:120px"></span></div>
+        <div class="pnl sub">загрузка…</div>
+      </div>
+      <span class="badge warn">…</span>
+    </div>
+    <svg class="spark" id="spark" preserveAspectRatio="none"></svg>
+    <div class="grid" id="stats"></div>
+  </div>
+  <div id="view"></div>
+</div>
+
+<nav id="nav"></nav>
+<div class="toast" id="toast"></div>
+
+<script>
+const TG = window.Telegram?.WebApp;
+const fmtSol = v => (v>=0?"":"-") + Math.abs(v).toFixed(5);
+const pct = v => (v>=0?"+":"") + v.toFixed(2) + "%";
+const cls = v => v > 0 ? "up" : v < 0 ? "down" : "";
+const short = m => m.slice(0,4) + "…" + m.slice(-4);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function ago(sec){
+  if (sec < 60) return sec + "с";
+  if (sec < 3600) return Math.floor(sec/60) + "м";
+  if (sec < 86400) return Math.floor(sec/3600) + "ч " + Math.floor(sec%3600/60) + "м";
+  return Math.floor(sec/86400) + "д";
+}
+function when(ts){
+  const d = new Date(ts*1000);
+  return d.toLocaleString("ru-RU",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"});
+}
+function price(p){
+  if (!p) return "—";
+  return p < 0.001 ? p.toExponential(3) : p.toPrecision(5);
+}
+
+let toastTimer;
+function toast(msg){
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.classList.add("show");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 3800);
+}
+
+async function api(path){
+  const r = await fetch(path, {headers: TG?.initData ? {"X-Telegram-Init-Data": TG.initData} : {}});
+  if (r.status === 401) throw new Error("Нет доступа — откройте панель из Telegram");
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return r.json();
+}
+
+/* ---------------- header ---------------- */
+function renderHero(d){
+  const hero = document.getElementById("hero");
+  const badge = d.bankrupt ? ["dead","БАНКРОТ"]
+              : !d.engine_alive ? ["dead","ДВИЖОК СТОИТ"]
+              : !d.can_open ? ["warn","БЕЗ СВОБОДНЫХ СРЕДСТВ"]
+              : ["live","LIVE"];
+  hero.querySelector(".equity").innerHTML = `${d.equity_sol.toFixed(5)}<small>SOL</small>`;
+  const p = hero.querySelector(".pnl");
+  p.className = "pnl num " + cls(d.total_pnl_sol);
+  p.textContent = `${d.total_pnl_sol>=0?"+":""}${fmtSol(d.total_pnl_sol)} SOL · ${pct(d.total_pnl_pct)} от старта ${d.initial_sol.toFixed(3)}`;
+  const b = hero.querySelector(".badge");
+  b.className = "badge " + badge[0]; b.textContent = badge[1];
+
+  document.getElementById("stats").innerHTML = [
+    ["Свободно", d.balance_sol.toFixed(4), ""],
+    ["В позициях", d.open_value_sol.toFixed(4), ""],
+    ["Позиций", String(d.open_positions), ""],
+    ["Винрейт", d.closed_trades ? d.winrate_pct.toFixed(0)+"%" : "—", d.winrate_pct>=50?"up":d.closed_trades?"down":""],
+    ["W / L", `${d.wins} / ${d.losses}`, ""],
+    ["Кошельки 70%+", String(d.wallets_elite), ""],
+  ].map(([label,val,c]) => `<div class="stat"><b class="${c}">${val}</b><span>${label}</span></div>`).join("");
+}
+
+function renderSpark(points){
+  const svg = document.getElementById("spark");
+  if (!points || points.length < 2){ svg.innerHTML = ""; return; }
+  const ys = points.map(p => p.equity);
+  const min = Math.min(...ys), max = Math.max(...ys), span = (max - min) || 1;
+  const W = 100, H = 30;
+  const xy = points.map((p,i) => [i/(points.length-1)*W, H - (p.equity-min)/span*H]);
+  const line = xy.map(([x,y],i) => (i?"L":"M") + x.toFixed(2) + " " + y.toFixed(2)).join(" ");
+  const rising = ys[ys.length-1] >= ys[0];
+  const color = rising ? "var(--up)" : "var(--down)";
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.innerHTML = `
+    <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="${color}" stop-opacity=".28"/>
+      <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
+    </linearGradient></defs>
+    <path d="${line} L ${W} ${H} L 0 ${H} Z" fill="url(#g)"/>
+    <path d="${line}" fill="none" stroke="${color}" stroke-width="1.6"
+          vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"/>`;
+}
+
+/* ---------------- tabs ---------------- */
+const ICON = {
+  home:'<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/>',
+  pos :'<path d="M3 17l6-6 4 4 8-8"/><path d="M21 7v5h-5"/>',
+  hist:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>',
+  wal :'<path d="M3 7a2 2 0 012-2h13a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><path d="M16 12h3"/>',
+  sig :'<path d="M4 20V10"/><path d="M10 20V4"/><path d="M16 20v-7"/><path d="M22 20h-20"/>',
+};
+
+const TABS = [
+  {id:"overview", label:"Обзор",    icon:"home", render:viewOverview},
+  {id:"positions",label:"Позиции",  icon:"pos",  render:viewPositions},
+  {id:"trades",   label:"Сделки",   icon:"hist", render:viewTrades},
+  {id:"wallets",  label:"Кошельки", icon:"wal",  render:viewWallets},
+  {id:"weights",  label:"Сигналы",  icon:"sig",  render:viewWeights},
+];
+
+let active = "overview";
+let overview = null;
+
+document.getElementById("nav").innerHTML = TABS.map(t =>
+  `<button data-tab="${t.id}"><svg viewBox="0 0 24 24">${ICON[t.icon]}</svg>${t.label}</button>`).join("");
+document.getElementById("nav").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  active = b.dataset.tab; TG?.HapticFeedback?.selectionChanged?.();
+  syncNav(); refresh();
+});
+function syncNav(){
+  document.querySelectorAll("#nav button").forEach(b => b.classList.toggle("on", b.dataset.tab === active));
+}
+
+/* ---------------- views ---------------- */
+function positionCard(p){
+  // Distance travelled from the stop toward the peak — shows how much room is left.
+  const room = p.stop_price && p.current_price
+    ? Math.max(0, Math.min(100, (p.current_price - p.stop_price) / p.current_price * 100)) : 0;
+  const c = cls(p.change_pct);
+  return `<div class="card">
+    <div class="card-h">
+      <div>
+        <div class="mint">${short(p.mint)}</div>
+        <div class="sub">${p.chain} · ${ago(p.age_seconds)} в позиции · ${p.wallets} кош.</div>
+      </div>
+      <div style="text-align:right">
+        <div class="big ${c}">${pct(p.change_pct)}</div>
+        <div class="sub num ${c}">${p.pnl_sol>=0?"+":""}${fmtSol(p.pnl_sol)} SOL</div>
+      </div>
+    </div>
+    <div class="bar"><i style="width:${room.toFixed(0)}%;background:var(--${p.change_pct>=0?"up":"down"})"></i></div>
+    <div class="kv">
+      <div><span>Вход</span>${price(p.entry_price)}</div>
+      <div><span>Сейчас</span>${price(p.current_price)}${p.priced?"":" <span class='warn'>?</span>"}</div>
+      <div><span>Пик</span>${price(p.peak_price)}</div>
+      <div><span>Стоп</span>${price(p.stop_price)}</div>
+      <div><span>Ставка</span>${p.stake_sol.toFixed(4)}</div>
+      <div><span>Закроется</span>${ago(p.expires_in)}</div>
+    </div>
+    ${p.trailing_armed ? '<div class="sub up" style="margin-top:7px">✓ трейлинг-стоп активирован</div>' : ""}
+  </div>`;
+}
+
+function viewOverview(){
+  const d = overview;
+  const cfg = d.config;
+  const pos = d.positions.length
+    ? d.positions.slice(0,3).map(positionCard).join("")
+    : `<div class="card empty">Открытых позиций нет</div>`;
+  return `
+    <div class="sec-title">Открытые позиции</div>${pos}
+    ${d.positions.length > 3 ? `<div class="sub" style="text-align:center;margin:6px">и ещё ${d.positions.length-3} — вкладка «Позиции»</div>` : ""}
+    <div class="sec-title">Результаты</div>
+    <div class="card">
+      <div class="row"><span class="sub">Закрытых сделок</span><b class="num">${d.closed_trades}</b></div>
+      <div class="row"><span class="sub">Реализованный P&L</span><b class="num ${cls(d.realized_pnl_sol)}">${d.realized_pnl_sol>=0?"+":""}${fmtSol(d.realized_pnl_sol)} SOL</b></div>
+      <div class="row"><span class="sub">Лучшая сделка</span><b class="num up">${pct(d.best_pct)}</b></div>
+      <div class="row"><span class="sub">Худшая сделка</span><b class="num down">${pct(d.worst_pct)}</b></div>
+    </div>
+    <div class="sec-title">Пул кошельков</div>
+    <div class="card">
+      <div class="row"><span class="sub">Всего отслеживается</span><b class="num">${d.wallets_total}</b></div>
+      <div class="row"><span class="sub">Winrate ≥ 70% (вес 0.25)</span><b class="num up">${d.wallets_elite}</b></div>
+      <div class="row"><span class="sub">Winrate ≥ 50%</span><b class="num">${d.wallets_active}</b></div>
+      <div class="row"><span class="sub">Средний winrate</span><b class="num">${d.wallets_avg_winrate_pct.toFixed(1)}%</b></div>
+    </div>
+    <div class="sec-title">Параметры движка</div>
+    <div class="card">
+      <div class="row"><span class="sub">Порог входа</span><b class="num">${cfg.entry_score}</b></div>
+      <div class="row"><span class="sub">Ставка</span><b class="num">${cfg.stake_sol} SOL</b></div>
+      <div class="row"><span class="sub">Жёсткий стоп</span><b class="num">−${cfg.hard_stop_pct}%</b></div>
+      <div class="row"><span class="sub">Трейлинг</span><b class="num">от +${cfg.trailing_activate_pct}%, шаг ${cfg.trailing_distance_pct}%</b></div>
+      <div class="row"><span class="sub">Макс. удержание</span><b class="num">${cfg.max_hold_hours}ч</b></div>
+      <div class="row"><span class="sub">Опрос / сети</span><b class="num">${cfg.poll_seconds}с · ${cfg.chains.join(", ")}</b></div>
+    </div>`;
+}
+
+function viewPositions(){
+  const d = overview;
+  if (!d.positions.length) return `<div class="card empty">Открытых позиций нет.<br>Движок ждёт схождения сигналов.</div>`;
+  return d.positions.map(positionCard).join("");
+}
+
+async function viewTrades(){
+  const {trades} = await api("/api/trades?limit=60");
+  if (!trades.length) return `<div class="card empty">Сделок пока нет</div>`;
+  return `<div class="card">` + trades.map(t => {
+    const isExit = t.action === "EXIT";
+    return `<div class="row">
+      <div style="min-width:0">
+        <span class="tag ${isExit?"exit":"entry"}">${t.action === "ENTRY" ? "ВХОД" : "ВЫХОД"}</span>
+        <span class="mint" style="margin-left:6px">${short(t.token_mint)}</span>
+        <div class="sub">${when(t.event_ts)} · ${esc(t.reason)}</div>
+      </div>
+      <div style="text-align:right;white-space:nowrap">
+        ${isExit
+          ? `<div class="num ${cls(t.pnl_sol)}" style="font-weight:650">${pct(t.pnl_pct*100)}</div>
+             <div class="sub num ${cls(t.pnl_sol)}">${t.pnl_sol>=0?"+":""}${fmtSol(t.pnl_sol)}</div>`
+          : `<div class="sub num">score ${t.signal_score.toFixed(3)}</div>
+             <div class="sub num">${t.wallet_count} кош.</div>`}
+      </div>
+    </div>`;
+  }).join("") + `</div>`;
+}
+
+async function viewWallets(){
+  const {wallets, buckets, blacklisted} = await api("/api/wallets?limit=60");
+  const head = `<div class="card">
+    <div class="kv" style="margin-top:0">
+      <div><span>90%+</span><b class="num up">${buckets.w90}</b></div>
+      <div><span>70–90%</span><b class="num up">${buckets.w70}</b></div>
+      <div><span>60–70%</span><b class="num">${buckets.w60}</b></div>
+      <div><span>50–60%</span><b class="num">${buckets.w50}</b></div>
+      <div><span>В чёрном списке</span><b class="num down">${blacklisted}</b></div>
+    </div></div>`;
+  if (!wallets.length) return head + `<div class="card empty">Кошельки ещё не загружены</div>`;
+  return head + `<div class="sec-title">Топ по winrate</div><div class="card">` + wallets.map(w => {
+    const wr = w.winrate * 100;
+    return `<div class="row">
+      <div style="min-width:0">
+        <a class="link mint" href="https://gmgn.ai/sol/address/${encodeURIComponent(w.address)}" target="_blank" rel="noopener">${short(w.address)}</a>
+        <div class="sub">${esc(w.source)}${w.last_seen ? " · был " + ago(Math.max(0,(overview?.server_time||Date.now()/1000) - w.last_seen)) + " назад" : ""}</div>
+      </div>
+      <b class="num ${wr>=70?"up":wr>=60?"":"warn"}">${wr.toFixed(0)}%</b>
+    </div>`;
+  }).join("") + `</div>`;
+}
+
+async function viewWeights(){
+  const [{weights, entry_score}, {events}] = await Promise.all([
+    api("/api/weights?limit=25"), api("/api/events?limit=25")
+  ]);
+  let out = "";
+  if (!weights.length){
+    out += `<div class="card empty">Нет монет с ненулевым весом.<br>Движок ещё не собрал кластер.</div>`;
+  } else {
+    out += `<div class="sec-title">Ближе всего к входу (порог ${entry_score})</div><div class="card">` +
+      weights.map(w => {
+        const ready = w.score >= entry_score;
+        const fill = Math.min(100, w.score / entry_score * 100);
+        return `<div style="padding:9px 0;border-bottom:1px solid var(--line)">
+          <div style="display:flex;justify-content:space-between;gap:8px">
+            <a class="link mint" href="https://gmgn.ai/sol/token/${encodeURIComponent(w.token_mint)}" target="_blank" rel="noopener">${short(w.token_mint)}</a>
+            <b class="num ${ready?"up":""}">${w.score.toFixed(4)}${ready?" ✓":""}</b>
+          </div>
+          <div class="bar"><i style="width:${fill.toFixed(0)}%;background:var(--${ready?"up":"accent"})"></i></div>
+          <div class="sub" style="margin-top:4px">${w.buy_wallets}/${w.total_wallets} кошельков покупают${ready?"" : ` · не хватает ${w.need.toFixed(4)}`}</div>
+        </div>`;
+      }).join("") + `</div>`;
+  }
+  out += `<div class="sec-title">Лента движка</div><div class="card">` +
+    (events.length ? events.map(e => `<div class="row">
+        <div style="min-width:0"><span class="tag ${e.kind==="ENTRY"?"entry":"exit"}">${esc(e.kind)}</span>
+        <div class="sub" style="margin-top:3px;word-break:break-word">${esc(e.message)}</div></div>
+        <span class="sub" style="white-space:nowrap">${when(e.event_ts)}</span>
+      </div>`).join("") : `<div class="empty">Событий нет</div>`) + `</div>`;
+  return out;
+}
+
+/* ---------------- refresh loop ---------------- */
+let busy = false;
+async function refresh(){
+  if (busy) return;
+  busy = true;
+  try {
+    overview = await api("/api/overview");
+    renderHero(overview);
+    const tab = TABS.find(t => t.id === active);
+    document.getElementById("view").innerHTML = await tab.render();
+    if (active === "overview"){
+      const {curve} = await api("/api/equity?limit=300");
+      renderSpark(curve);
+    }
+  } catch (e){
+    toast(e.message || "Ошибка соединения");
+  } finally {
+    busy = false;
+  }
+}
+
+TG?.ready?.(); TG?.expand?.();
+if (TG?.setHeaderColor) { try { TG.setHeaderColor("secondary_bg_color"); } catch(e){} }
+syncNav();
+refresh();
+setInterval(refresh, 10000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+</script>
+</body>
+</html>

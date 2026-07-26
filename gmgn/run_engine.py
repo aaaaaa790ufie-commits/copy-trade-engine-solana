@@ -2,6 +2,7 @@
 from __future__ import annotations
 import argparse, logging, os, sqlite3, time
 from pathlib import Path
+import config
 from paper_engine import DB, POLL, cycle, init, emit, is_blacklisted, LOG
 
 SEEDS_PATH = Path(os.getenv("SEED_WALLETS_SOL", str(Path(__file__).resolve().parent.parent / "data" / "seed_wallets_sol.txt")))
@@ -59,6 +60,7 @@ def main():
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--db-path", default=DB)
     args = ap.parse_args()
+    config.use_utf8_stdio()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     c = sqlite3.connect(args.db_path, timeout=30)
     init(c)

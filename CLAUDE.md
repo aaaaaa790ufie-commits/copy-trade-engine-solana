@@ -17,18 +17,20 @@ python gmgn/run_engine.py
 # GMGN_CHAINS="sol" GMGN_ENTRY_SCORE="0.25" python gmgn/run_engine.py
 
 # 3. Run Telegram bot (separate terminal)
-export TELEGRAM_BOT_TOKEN="<redacted-revoked-token>"
-export TELEGRAM_CHAT_ID="6207459171"
 python gmgn/telegram_bot.py
+
+# Or start everything (engine + bot + mini app) at once:
+python gmgn/supervisor.py
 ```
 
 ## Environment
 
-`.env` is gitignored — contains Telegram token + chat ID.
-Copy `.env.example` for template, or source .env manually:
+**Never put a real secret in a tracked file.** All credentials live in `.env`
+at the repo root, which is gitignored. `gmgn/config.py` loads it automatically
+for every process — no `export` needed.
 
 ```bash
-export $(grep -v '^#' .env | xargs)
+cp .env.example .env   # then fill in the values
 ```
 
 ## Dependencies
@@ -44,25 +46,48 @@ Python packages: none beyond stdlib (`sqlite3`, `urllib`, `json`, etc.)
 ## Architecture
 
 ```
-gmgn-cli  ──REST──►  gmgn/paper_engine.py  ──SQLite──►  gmgn/telegram_bot.py
-  (read-only              │                                    │
-   GMGN API)       weighted convergence         /status /trades /wallets
-                    + paper account              + proactive push
-                    + trailing/hard stops         (engine_events)
-                    + wallet discovery
+                    gmgn/config.py  ← repo-local .env (all credentials)
+                           │
+gmgn-cli ──REST──► gmgn/paper_engine.py ──SQLite──┬─► gmgn/telegram_bot.py
+ (read-only            │                          │     commands + push
+  GMGN API)      weighted convergence             │
+                 + paper account                  └─► gmgn/webapp.py
+                 + trailing/hard stops                  read-only JSON API
+                 + wallet discovery                     + Mini App UI
+
+                 gmgn/supervisor.py — runs all three, restarts on exit
 ```
+
+`gmgn/config.py` is the single source of truth for settings and secrets. Add new
+tunables there rather than calling `os.getenv` at a use site.
+
+## Cycle ordering (do not reorder)
+
+`cycle()` runs: feed → **exits** → entries → throttled maintenance. Stop-loss checks
+must stay ahead of anything that calls the stats API. They used to run after a
+`get_stats()` sweep of every maker in the feed (up to 20 round-trips × 45 s timeout),
+which delayed stops by tens of minutes and produced two −99.99% exits on a −45% hard
+stop. `test_exits_run_before_wallet_stats` guards this.
+
+Entry weights come from `cached_weights()` — the win rates already in `wallet_watch` —
+so the fast path costs one API call. `refresh_wallet_stats` keeps those values current
+in the background, bounded by `GMGN_STATS_BATCH_MAX`.
 
 ## Key parameters
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `GMGN_CHAINS` | `sol,robinhood` | Chains to poll (only `sol` works) |
+| `GMGN_CHAINS` | `sol` | Chains to poll (only `sol` works) |
 | `GMGN_POLL_SECONDS` | 15 | Feed poll interval |
 | `GMGN_ENTRY_SCORE` | 0.25 | Entry threshold (one 70%+ wallet = entry) |
 | `PAPER_BUDGET_SOL` | 0.1 | Initial paper balance |
 | `PAPER_TRADE_SIZE_SOL` | 0.025 | Stake per entry |
 | `GMGN_CLUSTER_WINDOW_SECONDS` | 1800 | 30 min cluster window |
 | `HARD_STOP_PCT` | 45 | Emergency exit level |
+| `GMGN_MAINTENANCE_SECONDS` | 600 | Wallet bookkeeping interval |
+| `GMGN_STATS_BATCH_MAX` | 6 | Cap on stats round-trips per pass |
+| `WEBAPP_PORT` | 8770 | Mini App server port |
+| `WEBAPP_PUBLIC_URL` | — | HTTPS origin; enables the Telegram button **and** auth |
 
 ## Weight computation
 
@@ -82,17 +107,36 @@ def weight(winrate: float) -> float:
   instead of a scalar. Already fixed in `token_price()` — check if any new
   price-parsing code hits the same trap.
 - **Windows PATH** — `gmgn-cli.cmd` extension is required for Python
-  `CreateProcess` on Windows; `_find_gmgn()` handles it.
+  `CreateProcess` on Windows; `_find_gmgn()` handles it, falling back to
+  `%APPDATA%\npm`.
+- **cp1251 console** — logs and Telegram text are Russian with emoji. Every
+  entrypoint calls `config.use_utf8_stdio()` first; without it the first such
+  line raises `UnicodeEncodeError` and kills the process.
 
 ## Telegram bot commands
 
 | Command | Description |
 |---|---|
-| `/status` | Paper account balance + open positions |
-| `/trades` | Last 10 trades |
-| `/wallets` | Wallet pool stats |
-| `/weights` | Top 10 token scores |
+| `/status` | Balance, realized P&L, engine heartbeat, open positions |
+| `/positions` | Per-position entry/peak/stop/expiry |
+| `/trades` | Last 12 trades |
+| `/wallets` | Wallet pool by win-rate bucket |
+| `/weights` | Tokens near the entry threshold |
+| `/config` | Resolved engine parameters |
 | `/help` | This menu |
+
+## Mini App
+
+`gmgn/webapp.py` + `gmgn/webapp/index.html`. Read-only JSON API over SQLite
+(`mode=ro`) plus a single-page UI. Auth is Telegram `initData` HMAC, required
+whenever `WEBAPP_PUBLIC_URL` is set; the signature is pinned to
+`TELEGRAM_CHAT_ID` so only the owner can read the panel through a tunnel.
+
+## Tests
+
+```bash
+python -m unittest discover -s gmgn -p 'test_*.py'
+```
 
 ## GitHub auth
 

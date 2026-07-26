@@ -2,17 +2,24 @@
 from __future__ import annotations
 import json, logging, os, shutil, sqlite3, subprocess, time
 from collections import defaultdict
+import config
 LOG=logging.getLogger("paper-engine")
-DB=os.getenv("SENTINEL_DB","sentinel.db"); BUDGET=float(os.getenv("PAPER_BUDGET_SOL","0.1")); STAKE=float(os.getenv("PAPER_TRADE_SIZE_SOL","0.025")); WINDOW=int(os.getenv("GMGN_CLUSTER_WINDOW_SECONDS","1800")); COOLDOWN=int(os.getenv("GMGN_COOLDOWN_SECONDS","420")); POLL=int(os.getenv("GMGN_POLL_SECONDS","15")); ENTRY=float(os.getenv("GMGN_ENTRY_SCORE","0.25")); TRAIL_ACT=float(os.getenv("TRAILING_ACTIVATE_PCT","25"))/100; TRAIL_DIST=float(os.getenv("TRAILING_DISTANCE_PCT","15"))/100; HARD=float(os.getenv("HARD_STOP_PCT","45"))/100; LIMIT=int(os.getenv("GMGN_FEED_LIMIT","200")); CHAINS=[x.strip() for x in os.getenv("GMGN_CHAINS","sol,robinhood").split(",") if x.strip()]
-MAX_HOLD=int(os.getenv("GMGN_MAX_HOLD_SECONDS","21600")); ZERO_TTL=int(os.getenv("GMGN_ZERO_WINRATE_TTL_SECONDS","3600")); PRICE_TTL=int(os.getenv("GMGN_PRICE_TTL_SECONDS","60"))
+# All tunables and credentials come from the repo-local .env via config.py.
+DB=config.DB_PATH; BUDGET=config.BUDGET_SOL; STAKE=config.STAKE_SOL; WINDOW=config.CLUSTER_WINDOW; COOLDOWN=config.COOLDOWN_SECONDS; POLL=config.POLL_SECONDS; ENTRY=config.ENTRY_SCORE; TRAIL_ACT=config.TRAILING_ACTIVATE_PCT/100; TRAIL_DIST=config.TRAILING_DISTANCE_PCT/100; HARD=config.HARD_STOP_PCT/100; LIMIT=config.FEED_LIMIT; CHAINS=config.CHAINS
+MAX_HOLD=config.MAX_HOLD_SECONDS; ZERO_TTL=config.ZERO_WINRATE_TTL; PRICE_TTL=config.PRICE_TTL
 def _find_gmgn():
+    """Resolve the gmgn-cli entrypoint. On Windows CreateProcess needs the .cmd shim
+    by name, and npm's global bin is often missing from a non-login shell's PATH."""
     for name in ("gmgn-cli","gmgn-cli.cmd"):
         found=shutil.which(name)
         if found: return found
+    if os.name=="nt":
+        npm_bin=os.path.expandvars(r"%APPDATA%\npm\gmgn-cli.cmd")
+        if os.path.isfile(npm_bin): return npm_bin
     return "gmgn-cli.cmd" if os.name=="nt" else "gmgn-cli"
 _GMGN=_find_gmgn()
 def cli(args):
- p=subprocess.run([_GMGN,*args,"--raw"],capture_output=True,text=True,timeout=45)
+ p=subprocess.run([_GMGN,*args,"--raw"],capture_output=True,text=True,timeout=45,env=config.gmgn_env())
  if p.returncode: raise RuntimeError((p.stderr or p.stdout).strip())
  lines=[x.strip() for x in p.stdout.splitlines() if x.strip()]; return json.loads(lines[-1]) if lines else {}
 def list_rows(x):
@@ -67,13 +74,20 @@ CREATE TABLE IF NOT EXISTS wallet_watch(address TEXT NOT NULL,chain TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS wallet_blacklist(address TEXT NOT NULL,chain TEXT NOT NULL,blacklisted_at INTEGER NOT NULL,reason TEXT,PRIMARY KEY(address,chain));
 CREATE TABLE IF NOT EXISTS token_scores(chain TEXT NOT NULL,token_mint TEXT NOT NULL,score REAL NOT NULL,buy_wallets INTEGER NOT NULL,total_wallets INTEGER NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(chain,token_mint));
 CREATE TABLE IF NOT EXISTS engine_events(id INTEGER PRIMARY KEY AUTOINCREMENT,event_ts INTEGER NOT NULL,kind TEXT NOT NULL,message TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS engine_state(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_trades_ts ON paper_trades(event_ts);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON engine_events(event_ts);
+CREATE INDEX IF NOT EXISTS idx_watch_winrate ON wallet_watch(chain,active,winrate);
 """); c.commit()
 def emit(c,kind,msg): LOG.info("%s: %s",kind,msg); c.execute("INSERT INTO engine_events VALUES(NULL,?,?,?)",(int(time.time()),kind,msg))
 def is_blacklisted(c,addr,chain): return bool(c.execute("SELECT 1 FROM wallet_blacklist WHERE address=? AND chain=?",(addr,chain)).fetchone())
-def get_stats(chain,wallets):
+def get_stats(chain,wallets,max_batches=0):
+ """Fetch portfolio stats in batches of 10. `max_batches` caps the work per call so a
+ slow or timing-out API can never stall the loop that enforces stop-losses."""
  out={}
- for i in range(0,len(wallets),10):
-  b=wallets[i:i+10]
+ batches=[wallets[i:i+10] for i in range(0,len(wallets),10)]
+ if max_batches>0: batches=batches[:max_batches]
+ for b in batches:
   try: got=list_rows(cli(["portfolio","stats","--chain",chain,"--wallet",*b,"--period","30d"]))
   except Exception as e: LOG.warning("stats %s: %s",chain,e); continue
   for r in got:
@@ -82,11 +96,14 @@ def get_stats(chain,wallets):
   if len(b)==1 and b[0] not in out and len(got)==1: out[b[0]]=got[0]
   time.sleep(0.25)
  return out
-STATS_REFRESH_SEC=int(os.getenv("GMGN_STATS_TTL_SECONDS","3600"))
+STATS_REFRESH_SEC=config.STATS_TTL
+# Wallet bookkeeping is background work: bounded per pass so it can never crowd out
+# the price checks that close positions.
+STATS_BATCH_MAX=config.get_int("GMGN_STATS_BATCH_MAX",6)
 def refresh_wallet_stats(c,chain,now):
- stale=c.execute("SELECT address FROM wallet_watch WHERE chain=? AND (winrate=0 OR ?-updated_at>=?) LIMIT 200",(chain,now,STATS_REFRESH_SEC)).fetchall()
+ stale=c.execute("SELECT address FROM wallet_watch WHERE chain=? AND (winrate=0 OR ?-updated_at>=?) ORDER BY updated_at LIMIT ?",(chain,now,STATS_REFRESH_SEC,STATS_BATCH_MAX*10)).fetchall()
  if not stale: return 0
- addrs=[r[0] for r in stale]; st=get_stats(chain,addrs); upd=0; new_high=[]
+ addrs=[r[0] for r in stale]; st=get_stats(chain,addrs,max_batches=STATS_BATCH_MAX); upd=0; new_high=[]
  for w,data in st.items():
   wrv=wr(data); bc=int(n(data,"buy","buy_count","trades_7d")); sc=int(n(data,"sell","sell_count")); total_buys=max(bc,sc)
   # newbie filter: 100% winrate with only 1 trade total — mark as low to be cleaned
@@ -189,42 +206,68 @@ def save_token_scores(c,chain,trades,weights,now):
   buys=[w for w,t in ws.items() if quote(t)=="buy"]; score=sum(weights[w] for w in buys)
   if score>0:
    c.execute("INSERT INTO token_scores(chain,token_mint,score,buy_wallets,total_wallets,updated_at) VALUES(?,?,?,?,?,?)",(chain,m,score,len(buys),len(ws),now))
+MAINT_INTERVAL=config.get_int("GMGN_MAINTENANCE_SECONDS",600)
+_last_maint={}
+def cached_weights(c,chain):
+ """Weights straight from the winrates already stored in wallet_watch.
+
+ The feed hands us ~200 makers per poll; asking the stats API about all of them took
+ up to 20 round-trips of 45s each, which is what used to delay stop-loss checks by
+ tens of minutes. Winrates barely move over an hour, so the cached value is just as
+ good a weight, and refresh_wallet_stats keeps it current in the background."""
+ return {a:weight(w) for a,w in c.execute("SELECT address,winrate FROM wallet_watch WHERE chain=? AND active=1 AND winrate>=0.50",(chain,)) if weight(w)>0}
+def learn_new_makers(c,chain,trades,now):
+ """Look up only makers we have never scored before, a few batches per cycle."""
+ seen={r[0] for r in c.execute("SELECT address FROM wallet_watch WHERE chain=?",(chain,))}
+ unknown=sorted({wallet(t) for t in trades if wallet(t)} - seen)
+ if not unknown: return {}
+ stats=get_stats(chain,unknown,max_batches=STATS_BATCH_MAX); new_w=0; high_wr=[]
+ for w,s in stats.items():
+  wrv=wr(s)
+  if wrv<=0 or is_blacklisted(c,w,chain): continue
+  c.execute("INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(address,chain) DO UPDATE SET last_seen=excluded.last_seen,winrate=excluded.winrate,updated_at=excluded.updated_at",(w,chain,"gmgn",now,wrv,now))
+  new_w+=1
+  if wrv>=.70: high_wr.append((w[:8],wrv))
+ if new_w:
+  total=c.execute("SELECT COUNT(*) FROM wallet_watch WHERE chain=? AND active=1",(chain,)).fetchone()[0]
+  s=f"70%+: {len(high_wr)}"+(f" ex: {high_wr[0][0]}... {high_wr[0][1]*100:.0f}%" if high_wr else "")
+  emit(c,"WALLET",f"{chain} | +{new_w} новых, всего {total} | {s}")
+ return stats
+def heartbeat(c,now,detail=""):
+ c.execute("INSERT INTO engine_state(key,value,updated_at) VALUES('last_cycle',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(detail or str(now),now))
 def cycle(c):
  now=int(time.time())
  for chain in CHAINS:
+  # 1. Feed first — one fast call, and the only hard dependency of the exit path.
   try: trades=list_rows(cli(["track","smartmoney","--chain",chain,"--limit",str(LIMIT)]))
-  except Exception as e: LOG.warning("feed %s: %s",chain,e); continue
-  makers=sorted({wallet(t) for t in trades if wallet(t)}); stats=get_stats(chain,makers); weights={w:weight(wr(s)) for w,s in stats.items() if wr(s)>=.50 and n(s,"buy","buy_count","buy_count_7d","trades_7d")>0}
-  before=c.execute("SELECT COUNT(*) FROM wallet_watch WHERE chain=? AND active=1",(chain,)).fetchone()[0]; new_w=0; high_wr=[]
-  for w,z in weights.items():
-   exist=c.execute("SELECT 1 FROM wallet_watch WHERE address=? AND chain=?",(w,chain)).fetchone()
-   if not exist: new_w+=1
-   wrv=wr(stats[w])
-   if wrv>=.70: high_wr.append((w[:8],wrv))
-   if wrv>0 and not is_blacklisted(c,w,chain):
-    c.execute("INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(address,chain) DO UPDATE SET last_seen=excluded.last_seen,winrate=excluded.winrate,updated_at=excluded.updated_at",(w,chain,"gmgn",now,wrv,now))
-   elif not is_blacklisted(c,w,chain):
-    c.execute("INSERT INTO wallet_watch(address,chain,source,last_seen,winrate) VALUES(?,?,?,?,?) ON CONFLICT(address,chain) DO UPDATE SET last_seen=excluded.last_seen,winrate=excluded.winrate",(w,chain,"gmgn",now,wrv))
-  after=c.execute("SELECT COUNT(*) FROM wallet_watch WHERE chain=? AND active=1",(chain,)).fetchone()[0]
-  if new_w>0:
-   s=f"70%+: {len(high_wr)}"+(f" ex: {high_wr[0][0]}... {high_wr[0][1]*100:.0f}%" if high_wr else "")
-   emit(c,"WALLET",f"{chain} | +{new_w} новых, всего {after} | {s}")
-  enter(c,chain,trades,weights,now); exits(c,chain,trades,now); save_token_scores(c,chain,trades,weights,now)
+  except Exception as e:
+   LOG.warning("feed %s: %s",chain,e); trades=[]
+  # 2. Stops before anything else. Nothing slow may run ahead of this.
+  exits(c,chain,trades,now); c.commit()
+  if not trades: continue
+  # 3. Entry decisions off cached winrates, plus a bounded lookup of unseen makers.
+  stats=learn_new_makers(c,chain,trades,now)
+  weights=cached_weights(c,chain)
+  enter(c,chain,trades,weights,now); save_token_scores(c,chain,trades,weights,now)
   # 90%+ call-outs: эмитим сигнал когда профитный кошелёк входит в монету
   for t in trades:
    w=wallet(t); m=mint(t)
-   if w and m and w in stats and quote(t)=="buy":
-    wrs=wr(stats[w])
-    if wrs>=.90:
-     emit(c,"WALLET_BUY",f"кошелёк {w[:12]}... зашёл в монету {m} (wr={wrs*100:.0f}%)")
-  refresh_wallet_stats(c,chain,now)
-  discover_wallets(c,chain,now)
-  cleanup_wallets(c,chain,now)
- c.commit()
- LOG.info("[cycle] wallets=%d events_total=%d",c.execute("SELECT COUNT(*) FROM wallet_watch").fetchone()[0],c.execute("SELECT COUNT(*) FROM engine_events").fetchone()[0])
+   if w and m and w in stats and quote(t)=="buy" and wr(stats[w])>=.90:
+    emit(c,"WALLET_BUY",f"кошелёк {w[:12]}... зашёл в монету {m} (wr={wr(stats[w])*100:.0f}%)")
+  # 4. Background bookkeeping, throttled so it cannot dominate the loop. The last run is
+  # persisted so a restart loop cannot hammer the stats API.
+  if chain not in _last_maint:
+   row=c.execute("SELECT value FROM engine_state WHERE key=?",(f"maint_{chain}",)).fetchone()
+   _last_maint[chain]=int(row[0]) if row and str(row[0]).isdigit() else 0
+  if now-_last_maint.get(chain,0)>=MAINT_INTERVAL:
+   _last_maint[chain]=now
+   c.execute("INSERT INTO engine_state(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(f"maint_{chain}",str(now),now))
+   refresh_wallet_stats(c,chain,now); discover_wallets(c,chain,now); cleanup_wallets(c,chain,now)
+ heartbeat(c,now); c.commit()
+ LOG.info("[cycle] %.1fs wallets=%d open=%d",time.time()-now,c.execute("SELECT COUNT(*) FROM wallet_watch").fetchone()[0],c.execute("SELECT COUNT(*) FROM paper_positions WHERE status='open'").fetchone()[0])
 def main():
  import argparse
- ap=argparse.ArgumentParser(); ap.add_argument("--once",action="store_true"); ap.add_argument("--db-path",default=DB); a=ap.parse_args(); logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s"); c=sqlite3.connect(a.db_path,timeout=30); init(c)
+ ap=argparse.ArgumentParser(); ap.add_argument("--once",action="store_true"); ap.add_argument("--db-path",default=DB); a=ap.parse_args(); config.use_utf8_stdio(); logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s"); c=sqlite3.connect(a.db_path,timeout=30); init(c)
  try:
   while True:
    cycle(c)
