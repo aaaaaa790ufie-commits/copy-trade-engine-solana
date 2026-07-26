@@ -59,7 +59,16 @@ gmgn-cli ──REST──► gmgn/paper_engine.py ──SQLite──┬─► gm
 ```
 
 `gmgn/config.py` is the single source of truth for settings and secrets. Add new
-tunables there rather than calling `os.getenv` at a use site.
+tunables there rather than calling `os.getenv` at a use site, and document each one
+in `.env.example` — three tests enforce that the two stay in step, including that
+documented defaults match the literals in the code.
+
+## Paper-only is enforced, not assumed
+
+`config.gmgn_env()` strips `GMGN_PRIVATE_KEY` before spawning `gmgn-cli`, so the
+subprocess cannot sign a swap even if asked. Every read the engine performs was
+verified to work without it. `gmgn_env(allow_signing=True)` is the deliberate
+opt-in; a test asserts no file here uses it.
 
 ## Cycle ordering (do not reorder)
 

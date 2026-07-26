@@ -156,13 +156,26 @@ def mask(value: str) -> str:
 
 # gmgn-cli reads these from its own environment; we supply them from the repo.
 GMGN_CRED_KEYS = ("GMGN_API_KEY", "GMGN_PRIVATE_KEY", "GMGN_API_SECRET", "GMGN_WALLET_ADDRESS")
+# GMGN_PRIVATE_KEY is what signs a swap. Every call this project makes is a read —
+# feed, stats, token info, KOL — and all of them were verified to work without it.
+# Withholding it means a paper engine cannot submit a transaction even if some future
+# bug asked it to: the capability is absent from the subprocess, not merely unused.
+GMGN_SIGNING_KEYS = ("GMGN_PRIVATE_KEY",)
 GMGN_MACHINE_ENV = Path.home() / ".config" / "gmgn" / ".env"
 
 
-def gmgn_env() -> dict[str, str]:
-    """Environment for the `gmgn-cli` subprocess, with repo-local credentials injected."""
+def gmgn_env(allow_signing: bool = False) -> dict[str, str]:
+    """Environment for the `gmgn-cli` subprocess, with repo-local credentials injected.
+
+    The signing key is omitted unless explicitly requested. Nothing in this project
+    requests it — the parameter exists so that a caller which genuinely needs to sign
+    has to say so at the call site, where it is reviewable.
+    """
     env = dict(os.environ)
     for key in GMGN_CRED_KEYS:
+        if key in GMGN_SIGNING_KEYS and not allow_signing:
+            env.pop(key, None)  # drop it even if the ambient environment carries one
+            continue
         value = get(key)
         if value:
             env[key] = value

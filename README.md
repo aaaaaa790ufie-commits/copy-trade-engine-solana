@@ -114,4 +114,17 @@ The API is read-only (`/api/overview`, `/api/trades`, `/api/wallets`, `/api/weig
 python -m unittest discover -s gmgn -p 'test_*.py'
 ```
 
-The supplied 16 Solana wallets are in `data/seed_wallets_sol.txt`. The separate EVM CSV is not mixed into Solana data. The runtime is paper-only: no private key, signing, swap submission, or SOL movement.
+The supplied 16 Solana wallets are in `data/seed_wallets_sol.txt`. The separate EVM CSV is not mixed into Solana data.
+
+## Paper-only, enforced rather than asserted
+
+The runtime never signs anything, submits a swap, or moves SOL. That is not left to
+the code being careful: `config.gmgn_env()` strips `GMGN_PRIVATE_KEY` from the
+environment handed to every `gmgn-cli` subprocess, including one inherited from the
+ambient shell. Signing capability is absent from the child process, so a bug that
+tried to submit a transaction would fail for lack of a key rather than succeed.
+
+Every call the engine makes — smart-money feed, portfolio stats, token info, KOL
+discovery — was verified to work with the key withheld. `gmgn_env(allow_signing=True)`
+exists so that a caller which genuinely needs to sign has to say so where it can be
+reviewed; a test asserts no file in this project does.

@@ -1082,8 +1082,37 @@ class GmgnCliTests(unittest.TestCase):
         # The whole point of gmgn_env(): every API key stays inside the project.
         env = config.gmgn_env()
         for key in config.GMGN_CRED_KEYS:
+            if key in config.GMGN_SIGNING_KEYS:
+                continue
             if config.get(key):
                 self.assertEqual(env[key], config.get(key))
+
+    def test_the_signing_key_is_withheld_by_default(self):
+        # This runtime is paper-only. Every call it makes was verified to work without
+        # the signing key, so the subprocess should not be able to submit a swap at all.
+        env = config.gmgn_env()
+        for key in config.GMGN_SIGNING_KEYS:
+            self.assertNotIn(key, env, f"{key} must not reach a read-only gmgn-cli call")
+
+    def test_an_ambient_signing_key_is_stripped(self):
+        # Inherited from os.environ rather than .env — it must still be removed.
+        os.environ["GMGN_PRIVATE_KEY"] = "-----BEGIN PRIVATE KEY-----"
+        try:
+            self.assertNotIn("GMGN_PRIVATE_KEY", config.gmgn_env())
+        finally:
+            del os.environ["GMGN_PRIVATE_KEY"]
+
+    def test_signing_can_be_requested_explicitly(self):
+        if not config.get("GMGN_PRIVATE_KEY"):
+            self.skipTest("no signing key configured")
+        self.assertIn("GMGN_PRIVATE_KEY", config.gmgn_env(allow_signing=True))
+
+    def test_no_caller_in_this_project_requests_signing(self):
+        source_dir = pathlib.Path(__file__).resolve().parent
+        offenders = [p.name for p in source_dir.glob("*.py")
+                     if not p.name.startswith("test_")
+                     and "allow_signing=True" in p.read_text(encoding="utf-8")]
+        self.assertEqual(offenders, [], "a paper engine must never ask for signing rights")
 
 
 class ConfigDocumentationTests(unittest.TestCase):
