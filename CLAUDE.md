@@ -14,7 +14,7 @@ source .venv/Scripts/activate  # or: source .venv/bin/activate
 # 2. Run engine (reads .env automatically)
 python gmgn/run_engine.py
 # Or with overrides:
-# GMGN_CHAINS="sol" GMGN_ENTRY_SCORE="0.25" python gmgn/run_engine.py
+# GMGN_CHAINS="sol" GMGN_ENTRY_SCORE="1.0" python gmgn/run_engine.py
 
 # 3. Run Telegram bot (separate terminal)
 python gmgn/telegram_bot.py
@@ -78,7 +78,7 @@ must stay ahead of anything that calls the stats API. They used to run after a
 which delayed stops by tens of minutes and produced two −99.99% exits on a −45% hard
 stop. `test_exits_run_before_wallet_stats` guards this.
 
-Entry weights come from `cached_weights()` — the win rates already in `wallet_watch` —
+Entry weights come from `cached_winrates()` — the win rates already in `wallet_watch` —
 so the fast path costs one API call. `refresh_wallet_stats` keeps those values current
 in the background, bounded by `GMGN_STATS_BATCH_MAX`.
 
@@ -88,11 +88,12 @@ in the background, bounded by `GMGN_STATS_BATCH_MAX`.
 |---|---|---|
 | `GMGN_CHAINS` | `sol` | Chains to poll (only `sol` works) |
 | `GMGN_POLL_SECONDS` | 15 | Feed poll interval |
-| `GMGN_ENTRY_SCORE` | 0.25 | Entry threshold (one 70%+ wallet = entry) |
 | `PAPER_BUDGET_SOL` | 0.1 | Initial paper balance |
 | `PAPER_TRADE_SIZE_SOL` | 0.025 | Stake per entry |
 | `GMGN_CLUSTER_WINDOW_SECONDS` | 1800 | 30 min cluster window |
 | `HARD_STOP_PCT` | 45 | Emergency exit level |
+| `GMGN_MAX_HOLD_SECONDS` | 3600 | Auto-close after 1 h |
+| `GMGN_ENTRY_SCORE` | 1.0 | One 90%+ wallet, or two 80-90%, or four 70-80% |
 | `GMGN_MAINTENANCE_SECONDS` | 600 | Wallet bookkeeping interval |
 | `GMGN_STATS_BATCH_MAX` | 6 | Cap on stats round-trips per pass |
 | `WEBAPP_PORT` | 8770 | Mini App server port |
@@ -100,13 +101,30 @@ in the background, bounded by `GMGN_STATS_BATCH_MAX`.
 
 ## Weight computation
 
-```python
-def weight(winrate: float) -> float:
-    if winrate >= 0.70:  return 0.25    # ← single wallet can trigger entry
-    if winrate >= 0.60:  return 0.0625
-    if winrate >= 0.50:  return 0.03125
-    return 0.0
-```
+`paper_engine.WEIGHT_TIERS` is the single source; the panel and the bot build their
+win-rate buckets from it, and `MIN_WEIGHTED_WINRATE` / `TOP_WINRATE` derive from it so
+no threshold literal exists anywhere else.
+
+| 30d win rate | Weight | Against `ENTRY_SCORE=1.0` |
+|---|---:|---|
+| 90–100% | 1.0 | enters on its own |
+| 80–90% | 0.5 | two of them enter |
+| 70–80% | 0.25 | four of them enter |
+| 60–70% | 0.0625 | contributes only |
+| 50–60% | 0.03125 | contributes only |
+| below 50% | 0 | blacklisted by `cleanup_wallets` |
+
+The ladder and the threshold only mean something read together. The earlier pairing
+was a 0.25 top tier against a 0.25 threshold, so one 70% wallet was a full signal and
+"weighted convergence" never converged — every entry fired on `wallets=1`.
+
+## Attribution
+
+`trade_wallets` records which wallets produced each entry and what each contributed.
+`wallet_attribution()` splits every closed trade's P&L across them by weight share, so
+a lone 90% wallet owns its whole result and one of four owns a quarter. Surfaced as
+`/attribution` and the panel's «Вклад» tab. The totals reconcile exactly with realised
+P&L — a test asserts it.
 
 ## Known issues
 
@@ -131,6 +149,7 @@ def weight(winrate: float) -> float:
 | `/trades` | Last 12 trades |
 | `/wallets` | Wallet pool by win-rate bucket |
 | `/weights` | Tokens near the entry threshold |
+| `/attribution` | Realised P&L split across the wallets that triggered each entry |
 | `/config` | Resolved engine parameters |
 | `/help` | This menu |
 

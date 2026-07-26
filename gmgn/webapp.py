@@ -339,6 +339,17 @@ def api_weights(limit: int = 30) -> dict:
         c.close()
 
 
+def api_attribution(limit: int = 20) -> dict:
+    """Realised P&L split across the wallets whose buys triggered each entry."""
+    c = db()
+    try:
+        rows = pe.wallet_attribution(c, limit=limit)
+        return {"wallets": rows,
+                "total_sol": sum(r["attributed_sol"] for r in rows)}
+    finally:
+        c.close()
+
+
 def api_events(limit: int = 60) -> dict:
     c = db()
     try:
@@ -386,6 +397,7 @@ ROUTES = {
     "/api/wallets": lambda q: api_wallets(_limit(q, 100, 500)),
     "/api/weights": lambda q: api_weights(_limit(q, 30, 100)),
     "/api/events": lambda q: api_events(_limit(q, 60, 300)),
+    "/api/attribution": lambda q: api_attribution(_limit(q, 20, 200)),
     "/api/equity": lambda q: api_equity_curve(_limit(q, 200, 1000)),
     "/api/health": lambda q: {"ok": True, "time": int(time.time())},
 }

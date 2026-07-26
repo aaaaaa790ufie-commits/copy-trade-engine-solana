@@ -29,7 +29,7 @@ CHAT = config.TELEGRAM_CHAT_ID
 # by Telegram, so the button is offered only when a public origin is configured.
 WEBAPP_URL = config.WEBAPP_PUBLIC_URL if config.WEBAPP_PUBLIC_URL.startswith("https://") else ""
 
-PUSH_KINDS = ("ENTRY", "EXIT", "WALLET", "WALLET_BUY", "BANKRUPT", "RECOVERY", "ERROR", "STUCK")
+PUSH_KINDS = ("ENTRY", "EXIT", "WALLET", "MISSED", "BANKRUPT", "RECOVERY", "ERROR", "STUCK", "DEPOSIT")
 
 
 def api(method: str, data: dict | None = None) -> dict:
@@ -45,7 +45,7 @@ def api(method: str, data: dict | None = None) -> dict:
 
 def keyboard() -> str:
     """Persistent reply keyboard; the Mini App gets its own row when reachable."""
-    rows = [["/status", "/positions"], ["/trades", "/wallets"], ["/weights", "/help"]]
+    rows = [["/status", "/positions"], ["/trades", "/wallets"], ["/weights", "/attribution"], ["/config", "/help"]]
     kb = {"keyboard": rows, "resize_keyboard": True, "is_persistent": True}
     if WEBAPP_URL:
         kb["keyboard"] = [[{"text": "📊 Панель", "web_app": {"url": WEBAPP_URL}}]] + rows
@@ -75,6 +75,7 @@ def install_commands() -> None:
         ("trades", "Последние сделки"),
         ("wallets", "Пул кошельков"),
         ("weights", "Монеты у порога входа"),
+        ("attribution", "Кто заработал этому счёту"),
         ("config", "Параметры движка"),
         ("help", "Список команд"),
     ]
@@ -84,8 +85,8 @@ def install_commands() -> None:
         LOG.warning("could not register commands: %s", e)
 
 
-ICONS = {"ENTRY": "🟢", "EXIT": "🔴", "WALLET": "👛", "WALLET_BUY": "⭐",
-         "BANKRUPT": "💀", "RECOVERY": "♻️", "ERROR": "⚠️", "STUCK": "🧊"}
+ICONS = {"ENTRY": "🟢", "EXIT": "🔴", "WALLET": "👛", "MISSED": "⚪",
+         "BANKRUPT": "💀", "RECOVERY": "♻️", "ERROR": "⚠️", "STUCK": "🧊", "DEPOSIT": "💰"}
 # Events per push pass. The loop runs once per getUpdates round-trip, so this only
 # throttles a burst; the remainder goes out on the next pass.
 PUSH_BATCH = config.get_int("TELEGRAM_PUSH_BATCH", 20)
@@ -296,6 +297,20 @@ def text(c: sqlite3.Connection, command: str) -> str:
             f"{i+1}. {r[1][:10]}… score {r[2]:.4f} (не хватает {max(0, config.ENTRY_SCORE - r[2]):.4f}) · {r[3]}/{r[4]} кош."
             for i, r in enumerate(rs))
 
+    if command == "/attribution":
+        rows = pe.wallet_attribution(c, limit=15)
+        if not rows:
+            return ("Пока не по чему считать — нужна хотя бы одна закрытая сделка.\n"
+                    "Атрибуция делит результат сделки между кошельками, чьи покупки её вызвали.")
+        out = ["Кто заработал этому счёту (доля по вкладу в сигнал):"]
+        for r in rows:
+            mark = "🟩" if r["attributed_sol"] > 0 else "🟥" if r["attributed_sol"] < 0 else "⬜"
+            out.append(f"{mark} {r['address'][:10]}… wr {r['winrate']*100:.0f}% · "
+                       f"{r['wins']}/{r['trades']} · {r['attributed_sol']:+.5f} SOL")
+        total = sum(r["attributed_sol"] for r in rows)
+        out.append(f"\nИтого по показанным: {total:+.5f} SOL")
+        return "\n".join(out)
+
     if command == "/config":
         return (
             f"Сети: {', '.join(config.CHAINS)}\n"
@@ -313,6 +328,7 @@ def text(c: sqlite3.Connection, command: str) -> str:
             "/trades — последние сделки\n"
             "/wallets — пул кошельков\n"
             "/weights — монеты у порога входа\n"
+            "/attribution — кто заработал этому счёту\n"
             "/config — параметры движка\n"
             "/help — это меню")
 

@@ -85,7 +85,15 @@ def wr(s): return n(s,"winrate","win_rate","pnl_stat.winrate")
 # The weight ladder, highest tier first. Single source of truth: the panel and the bot
 # build their win-rate buckets from this, so a change to the tiers cannot leave them
 # reporting groupings that no longer match what actually carries weight.
-WEIGHT_TIERS=((0.70,0.25),(0.60,0.0625),(0.50,0.03125))
+#
+# Calibrated against ENTRY_SCORE=1.0, so entry requires genuine convergence:
+#   one wallet at 90%+          -> 1.0    entry on its own
+#   two wallets at 80-90%       -> 1.0
+#   four wallets at 70-80%      -> 1.0
+#   anything below 70% only ever contributes, never triggers.
+# The previous ladder topped out at 0.25 against a 0.25 threshold, which meant a single
+# 70% wallet was a full signal and "weighted convergence" never actually converged.
+WEIGHT_TIERS=((0.90,1.0),(0.80,0.5),(0.70,0.25),(0.60,0.0625),(0.50,0.03125))
 MIN_WEIGHTED_WINRATE=WEIGHT_TIERS[-1][0]
 TOP_WINRATE=WEIGHT_TIERS[0][0]
 def weight(x):
@@ -140,6 +148,12 @@ CREATE TABLE IF NOT EXISTS wallet_blacklist(address TEXT NOT NULL,chain TEXT NOT
 CREATE TABLE IF NOT EXISTS token_scores(chain TEXT NOT NULL,token_mint TEXT NOT NULL,score REAL NOT NULL,buy_wallets INTEGER NOT NULL,total_wallets INTEGER NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(chain,token_mint));
 CREATE TABLE IF NOT EXISTS engine_events(id INTEGER PRIMARY KEY AUTOINCREMENT,event_ts INTEGER NOT NULL,kind TEXT NOT NULL,message TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS engine_state(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at INTEGER NOT NULL);
+-- Which wallets produced each entry, and what each contributed to the score. Without
+-- this the engine records that four wallets agreed but not which four, so there is no
+-- way to ask the question the whole system exists to answer: which wallets actually
+-- make money when followed.
+CREATE TABLE IF NOT EXISTS trade_wallets(trade_id INTEGER NOT NULL,address TEXT NOT NULL,chain TEXT NOT NULL,winrate REAL NOT NULL,weight REAL NOT NULL,PRIMARY KEY(trade_id,address));
+CREATE INDEX IF NOT EXISTS idx_trade_wallets_addr ON trade_wallets(address);
 CREATE INDEX IF NOT EXISTS idx_trades_ts ON paper_trades(event_ts);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON engine_events(event_ts);
 CREATE INDEX IF NOT EXISTS idx_watch_winrate ON wallet_watch(chain,active,winrate);
@@ -266,7 +280,8 @@ def score_of(ws,weights):
  """Buying wallets for one mint and their summed weight."""
  buys={w:t for w,t in ws.items() if quote(t)=="buy"}
  return buys,sum(weights[w] for w in buys)
-def enter(c,chain,trades,weights,now):
+def enter(c,chain,trades,weights,now,winrates=None):
+ winrates=winrates if winrates is not None else cached_winrates(c,chain)
  latest=cluster(chain,trades,weights,now)
  open_mints={r[0] for r in c.execute("SELECT token_mint FROM paper_positions WHERE status='open'")}
  for m,ws in latest.items():
@@ -282,7 +297,12 @@ def enter(c,chain,trades,weights,now):
   # token_mint is the primary key, so a token traded before still has its closed row.
   # Reopening reuses it — the trade journal in paper_trades keeps the full history.
   c.execute("INSERT INTO paper_positions(token_mint,chain,entry_price,peak_price,stake_sol,opened_at,signal_score,wallet_count,status) VALUES(?,?,?,?,?,?,?,?,'open') ON CONFLICT(token_mint) DO UPDATE SET chain=excluded.chain,entry_price=excluded.entry_price,peak_price=excluded.peak_price,stake_sol=excluded.stake_sol,opened_at=excluded.opened_at,signal_score=excluded.signal_score,wallet_count=excluded.wallet_count,status='open'",(m,chain,p,p,STAKE,now,score,len(buys)))
-  c.execute("INSERT INTO paper_trades(token_mint,chain,action,price,stake_sol,reason,wallet_count,signal_score,event_ts) VALUES(?,?,?,?,?,?,?,?,?)",(m,chain,"ENTRY",p,STAKE,"weighted cluster",len(buys),score,now)); emit(c,"ENTRY",f"{chain} {m} | wallets={len(buys)} score={score:.4f} | {STAKE:.4f} SOL")
+  cur=c.execute("INSERT INTO paper_trades(token_mint,chain,action,price,stake_sol,reason,wallet_count,signal_score,event_ts) VALUES(?,?,?,?,?,?,?,?,?)",(m,chain,"ENTRY",p,STAKE,"weighted cluster",len(buys),score,now))
+  # Record who produced this signal, so the exit's P&L can be attributed back to them.
+  c.executemany("INSERT OR IGNORE INTO trade_wallets(trade_id,address,chain,winrate,weight) VALUES(?,?,?,?,?)",
+                [(cur.lastrowid,w,chain,winrates.get(w,0.0),weights[w]) for w in buys])
+  top=max(buys,key=lambda w:weights[w])
+  emit(c,"ENTRY",f"{chain} {m} | wallets={len(buys)} score={score:.4f} (лучший {top[:8]}… wr={winrates.get(top,0)*100:.0f}%) | {STAKE:.4f} SOL")
 def stop_level(entry,peak):
     """Where this position closes right now: (binding, hard, trailing, armed).
 
@@ -336,6 +356,37 @@ def save_token_scores(c,chain,trades,weights,now):
    c.execute("INSERT INTO token_scores(chain,token_mint,score,buy_wallets,total_wallets,updated_at) VALUES(?,?,?,?,?,?)",(chain,m,score,len(buys),len(ws),now))
 MAINT_INTERVAL=config.get_int("GMGN_MAINTENANCE_SECONDS",600)
 _last_maint={}
+ATTRIBUTION_SQL="""
+SELECT tw.address, tw.winrate, COUNT(*) AS trades,
+       SUM(CASE WHEN x.pnl_sol>0 THEN 1 ELSE 0 END) AS wins,
+       SUM(x.pnl_sol * tw.weight / e.signal_score) AS attributed_sol
+FROM trade_wallets tw
+JOIN paper_trades e ON e.id = tw.trade_id AND e.action='ENTRY'
+JOIN paper_trades x ON x.id = (
+      SELECT MIN(id) FROM paper_trades nxt
+      WHERE nxt.token_mint = e.token_mint AND nxt.action='EXIT' AND nxt.id > e.id)
+WHERE e.signal_score > 0
+GROUP BY tw.address
+ORDER BY attributed_sol DESC
+"""
+def wallet_attribution(c,limit=20):
+    """Realised P&L split across the wallets whose buys produced each entry.
+
+    A wallet's share of a trade is its weight over the entry's total score, so a lone
+    90% wallet owns the whole result and one of four contributors owns a quarter. Only
+    closed round trips count — the exit matched to an entry is the next EXIT on that
+    mint, which is exact because a mint has at most one open position at a time.
+
+    This is what turns 1200 watched wallets into an answerable question: not "who has a
+    good win rate on GMGN" but "who made *this account* money".
+    """
+    rows=c.execute(ATTRIBUTION_SQL).fetchall()
+    out=[{"address":a,"winrate":w,"trades":t,"wins":wins or 0,"attributed_sol":p or 0.0}
+         for a,w,t,wins,p in rows]
+    return out[:limit] if limit else out
+def cached_winrates(c,chain):
+ """Raw win rates for every wallet eligible to carry weight, keyed by address."""
+ return {a:w for a,w in c.execute(f"SELECT address,winrate FROM wallet_watch WHERE chain=? AND active=1 AND winrate>={MIN_WEIGHTED_WINRATE}",(chain,))}
 def cached_weights(c,chain):
  """Weights straight from the winrates already stored in wallet_watch.
 
@@ -386,31 +437,38 @@ def last_cycle_ts(c):
  return (row[0] if row and row[0] else 0) or 0
 ELITE_WINRATE=config.get_float("GMGN_ELITE_WINRATE",0.90)
 ELITE_CALLOUTS_MAX=config.get_int("GMGN_ELITE_CALLOUTS_MAX",10)
-def elite_buy_callouts(c,chain,trades,now,since):
- """Announce a top-winrate wallet buying into a token.
+def missed_elite_signals(c,chain,trades,now,since):
+ """Report a top-winrate buy the engine could NOT act on, and why.
 
- The feed replays its last few hundred trades on every poll, so this has to fire once
- per trade, not once per poll: only trades newer than the previous cycle count. On the
- first cycle after a start there is no previous cycle to compare against, so nothing is
- announced rather than replaying the whole feed. A long outage is likewise clamped to
- one cluster window, and the batch is capped, so a backlog cannot flood Telegram.
+ A wallet at ELITE_WINRATE now carries a full ENTRY_SCORE, so its buy opens a position
+ by itself and the ENTRY event says so. Announcing the same buy separately would be
+ pure duplication. What is worth knowing is the opposite case: a signal strong enough
+ to enter that was declined — the token is on cooldown, already held, unpriceable, or
+ the account is out of funds. Those are the entries the configuration cost you.
 
- Eligibility comes from wallet_watch, not from the freshly fetched stats of newly seen
- makers — otherwise an already-known elite wallet would never trigger a call-out."""
+ Bounded the same three ways as before: only trades newer than the previous cycle, a
+ long outage clamped to one cluster window, and a per-cycle cap, so the feed replaying
+ its backlog every poll cannot flood Telegram."""
  if not since: return
  cutoff=max(since,now-WINDOW)
  elite=dict(c.execute("SELECT address,winrate FROM wallet_watch WHERE chain=? AND active=1 AND winrate>=?",(chain,ELITE_WINRATE)))
  if not elite: return
+ open_mints={r[0] for r in c.execute("SELECT token_mint FROM paper_positions WHERE status='open'")}
+ balance=(c.execute("SELECT budget_sol FROM paper_account WHERE id=1").fetchone() or [0.0])[0]
  seen=set(); sent=0
  for t in sorted(trades,key=stamp,reverse=True):
   w=wallet(t); m=mint(t)
-  if not (w in elite and m and quote(t)=="buy" and stamp(t)>cutoff): continue
+  if not (w in elite and m and quote(t)=="buy" and stamp(t)>cutoff and allowed(t,chain)): continue
   if (w,m) in seen: continue
   seen.add((w,m))
-  emit(c,"WALLET_BUY",f"кошелёк {w[:12]}... зашёл в монету {m} (wr={elite[w]*100:.0f}%)")
+  if m in open_mints: why="уже в позиции"
+  elif cooling(c,m,chain,now): why="кулдаун после выхода"
+  elif balance<STAKE: why=f"не хватает средств ({balance:.4f} < {STAKE:.4f})"
+  else: continue   # it was actionable, so enter() took it and emitted ENTRY
+  emit(c,"MISSED",f"кошелёк {w[:12]}... (wr={elite[w]*100:.0f}%) зашёл в {m} — пропущено: {why}")
   sent+=1
   if sent>=ELITE_CALLOUTS_MAX:
-   LOG.info("elite call-outs capped at %d this cycle on %s",ELITE_CALLOUTS_MAX,chain); return
+   LOG.info("missed-signal reports capped at %d this cycle on %s",ELITE_CALLOUTS_MAX,chain); return
 def cycle(c):
  now=int(time.time()); since=last_cycle_ts(c)
  for chain in CHAINS:
@@ -423,9 +481,9 @@ def cycle(c):
   if not trades: continue
   # 3. Entry decisions off cached winrates, plus a bounded lookup of unseen makers.
   learn_new_makers(c,chain,trades,now)
-  weights=cached_weights(c,chain)
-  enter(c,chain,trades,weights,now); save_token_scores(c,chain,trades,weights,now)
-  elite_buy_callouts(c,chain,trades,now,since)
+  winrates=cached_winrates(c,chain); weights={a:weight(w) for a,w in winrates.items() if weight(w)>0}
+  enter(c,chain,trades,weights,now,winrates); save_token_scores(c,chain,trades,weights,now)
+  missed_elite_signals(c,chain,trades,now,since)
   # 4. Background bookkeeping, throttled so it cannot dominate the loop. The last run is
   # persisted so a restart loop cannot hammer the stats API.
   if chain not in _last_maint:

@@ -334,8 +334,126 @@ class AddressValidationTests(unittest.TestCase):
         self.assertEqual(c.execute("SELECT COUNT(*) FROM token_scores").fetchone()[0], 0)
 
 
-class EliteCalloutTests(unittest.TestCase):
-    """The feed replays its recent trades every poll, so call-outs must fire per trade."""
+class WeightLadderTests(unittest.TestCase):
+    """The ladder and the entry threshold have to be read together to mean anything."""
+
+    def test_the_bands_are_what_they_claim(self):
+        for wr, expected in ((0.95, 1.0), (0.90, 1.0), (0.89, 0.5), (0.80, 0.5),
+                             (0.79, 0.25), (0.70, 0.25), (0.69, 0.0625), (0.60, 0.0625),
+                             (0.59, 0.03125), (0.50, 0.03125), (0.49, 0.0), (0.0, 0.0)):
+            with self.subTest(winrate=wr):
+                self.assertEqual(pe.weight(wr), expected)
+
+    def test_entry_requires_real_convergence(self):
+        """A single 90%+ wallet is a full signal; nothing weaker is."""
+        cases = [
+            ([0.92], True, "one wallet at 90%+"),
+            ([0.85, 0.83], True, "two at 80-90%"),
+            ([0.75, 0.75, 0.75, 0.75], True, "four at 70-80%"),
+            ([0.85, 0.75, 0.75], True, "one 80-90% plus two 70-80%"),
+            ([0.85], False, "a single 80-90%"),
+            ([0.75, 0.75, 0.75], False, "three at 70-80%"),
+            ([0.69] * 10, False, "ten below 70% still fall short"),
+        ]
+        for winrates, should_enter, label in cases:
+            with self.subTest(label):
+                score = sum(pe.weight(w) for w in winrates)
+                self.assertEqual(score >= pe.ENTRY, should_enter,
+                                 f"{label}: score {score} against threshold {pe.ENTRY}")
+
+    def test_a_top_wallet_alone_reaches_the_threshold_exactly(self):
+        # This is the whole design: elite weight == entry threshold, so one such wallet
+        # enters and the notification about it is redundant rather than the mechanism.
+        self.assertEqual(pe.weight(pe.ELITE_WINRATE), pe.ENTRY)
+
+
+class AttributionTests(unittest.TestCase):
+    """Which wallets actually made this account money — the question the system exists for."""
+
+    def setUp(self):
+        self._token_price = pe.token_price
+
+    def tearDown(self):
+        pe.token_price = self._token_price
+
+    def _buy(self, maker, mint_, ts):
+        return {"maker": maker, "base_address": mint_, "side": "buy", "timestamp": ts,
+                "price_usd": 1.0, "launchpad": "pump"}
+
+    def test_a_lone_signal_owns_its_whole_result(self):
+        c = fresh_db()
+        winrates = {WALLET_A: 0.92}
+        weights = {WALLET_A: pe.weight(0.92)}
+        pe.token_price = lambda ch, m: 1.0
+        pe.enter(c, "sol", [self._buy(WALLET_A, MINT_A, NOW)], weights, NOW, winrates)
+        pe.token_price = lambda ch, m: 3.0
+        pe.exits(c, "sol", [], NOW + 1)
+        pe.token_price = lambda ch, m: 2.0          # off the peak -> trailing exit
+        pe.exits(c, "sol", [], NOW + 2)
+
+        rows = pe.wallet_attribution(c)
+        self.assertEqual(len(rows), 1)
+        realised = c.execute("SELECT SUM(pnl_sol) FROM paper_trades WHERE action='EXIT'").fetchone()[0]
+        self.assertAlmostEqual(rows[0]["attributed_sol"], realised, places=9)
+        self.assertEqual(rows[0]["wins"], 1)
+
+    def test_contributors_split_by_their_weight(self):
+        c = fresh_db()
+        winrates = {WALLET_B: 0.85, WALLET_C: 0.85}
+        weights = {w: pe.weight(v) for w, v in winrates.items()}
+        pe.token_price = lambda ch, m: 1.0
+        pe.enter(c, "sol", [self._buy(WALLET_B, MINT_A, NOW), self._buy(WALLET_C, MINT_A, NOW)],
+                 weights, NOW, winrates)
+        pe.token_price = lambda ch, m: 0.4          # hard stop
+        pe.exits(c, "sol", [], NOW + 1)
+
+        rows = {r["address"]: r["attributed_sol"] for r in pe.wallet_attribution(c)}
+        self.assertEqual(len(rows), 2)
+        self.assertAlmostEqual(rows[WALLET_B], rows[WALLET_C], places=12, msg="equal weight, equal blame")
+        self.assertLess(rows[WALLET_B], 0)
+
+    def test_attribution_reconciles_with_realised_pnl(self):
+        """Every SOL of realised P&L must be assigned to exactly one wallet's share."""
+        c = fresh_db()
+        winrates = {WALLET_A: 0.92, WALLET_B: 0.85, WALLET_C: 0.85}
+        weights = {w: pe.weight(v) for w, v in winrates.items()}
+
+        pe.token_price = lambda ch, m: 1.0
+        pe.enter(c, "sol", [self._buy(WALLET_A, MINT_A, NOW)], weights, NOW, winrates)
+        pe.token_price = lambda ch, m: 3.0
+        pe.exits(c, "sol", [], NOW + 1)
+        pe.token_price = lambda ch, m: 2.0
+        pe.exits(c, "sol", [], NOW + 2)
+
+        pe.token_price = lambda ch, m: 1.0
+        pe.enter(c, "sol", [self._buy(WALLET_B, MINT_B, NOW + 3), self._buy(WALLET_C, MINT_B, NOW + 3)],
+                 weights, NOW + 3, winrates)
+        pe.token_price = lambda ch, m: 0.4
+        pe.exits(c, "sol", [], NOW + 4)
+
+        attributed = sum(r["attributed_sol"] for r in pe.wallet_attribution(c, limit=0))
+        realised = c.execute("SELECT SUM(pnl_sol) FROM paper_trades WHERE action='EXIT'").fetchone()[0]
+        self.assertAlmostEqual(attributed, realised, places=9)
+
+    def test_an_open_position_is_not_attributed_yet(self):
+        c = fresh_db()
+        winrates = {WALLET_A: 0.92}
+        pe.token_price = lambda ch, m: 1.0
+        pe.enter(c, "sol", [self._buy(WALLET_A, MINT_A, NOW)],
+                 {WALLET_A: pe.weight(0.92)}, NOW, winrates)
+        self.assertEqual(pe.wallet_attribution(c), [], "only closed round trips count")
+
+    def test_no_trades_is_empty_not_an_error(self):
+        self.assertEqual(pe.wallet_attribution(fresh_db()), [])
+
+
+class MissedSignalTests(unittest.TestCase):
+    """A 90%+ wallet now enters by itself, so the notification reports the opposite.
+
+    Its weight equals ENTRY_SCORE, so enter() opens a position and emits ENTRY. Repeating
+    that as a separate call-out would be pure duplication. What carries information is a
+    signal strong enough to enter that was declined — and why.
+    """
 
     def _seed_elite(self, c, address=WALLET_A, winrate=0.95):
         c.execute("INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) "
@@ -345,51 +463,80 @@ class EliteCalloutTests(unittest.TestCase):
         return {"maker": maker, "base_address": mint_, "side": "buy", "timestamp": ts,
                 "price_usd": 1.0, "launchpad": "pump"}
 
-    def _count(self, c):
-        return c.execute("SELECT COUNT(*) FROM engine_events WHERE kind='WALLET_BUY'").fetchone()[0]
+    def _missed(self, c):
+        return [r[0] for r in c.execute("SELECT message FROM engine_events WHERE kind='MISSED'")]
 
-    def test_known_elite_wallet_triggers_a_callout(self):
-        # Regression: eligibility used to come from the freshly fetched stats of newly
-        # seen makers, so a wallet already on the watch list never triggered anything.
+    def test_actionable_signal_is_not_reported_as_missed(self):
+        # Nothing blocks it, so enter() takes it and the ENTRY event is the report.
         c = fresh_db()
         self._seed_elite(c)
-        pe.elite_buy_callouts(c, "sol", [self._buy(WALLET_A, MINT_A, NOW)], NOW, since=NOW - 10)
-        self.assertEqual(self._count(c), 1)
+        pe.missed_elite_signals(c, "sol", [self._buy(WALLET_A, MINT_A, NOW)], NOW, since=NOW - 10)
+        self.assertEqual(self._missed(c), [])
 
-    def test_replayed_trade_is_not_announced_twice(self):
+    def test_cooldown_is_reported(self):
         c = fresh_db()
         self._seed_elite(c)
+        c.execute("INSERT INTO paper_cooldowns VALUES(?,?,?)", (MINT_A, "sol", NOW + 300))
+        pe.missed_elite_signals(c, "sol", [self._buy(WALLET_A, MINT_A, NOW)], NOW, since=NOW - 10)
+        self.assertEqual(len(self._missed(c)), 1)
+        self.assertIn("кулдаун", self._missed(c)[0])
+
+    def test_already_held_is_reported(self):
+        c = fresh_db()
+        self._seed_elite(c)
+        c.execute("INSERT INTO paper_positions VALUES(?,'sol',1.0,1.0,0.025,?,1.0,4,'open')",
+                  (MINT_A, NOW))
+        pe.missed_elite_signals(c, "sol", [self._buy(WALLET_A, MINT_A, NOW)], NOW, since=NOW - 10)
+        self.assertIn("уже в позиции", self._missed(c)[0])
+
+    def test_insufficient_funds_is_reported(self):
+        c = fresh_db()
+        self._seed_elite(c)
+        c.execute("UPDATE paper_account SET budget_sol=0.001")
+        pe.missed_elite_signals(c, "sol", [self._buy(WALLET_A, MINT_A, NOW)], NOW, since=NOW - 10)
+        self.assertIn("не хватает средств", self._missed(c)[0])
+
+    def test_replayed_trade_is_not_reported_twice(self):
+        c = fresh_db()
+        self._seed_elite(c)
+        c.execute("INSERT INTO paper_cooldowns VALUES(?,?,?)", (MINT_A, "sol", NOW + 300))
         trades = [self._buy(WALLET_A, MINT_A, NOW - 5)]
-        pe.elite_buy_callouts(c, "sol", trades, NOW, since=NOW - 10)
-        pe.elite_buy_callouts(c, "sol", trades, NOW + 15, since=NOW)  # same trade, next poll
-        self.assertEqual(self._count(c), 1, "the same trade must announce once")
+        pe.missed_elite_signals(c, "sol", trades, NOW, since=NOW - 10)
+        pe.missed_elite_signals(c, "sol", trades, NOW + 15, since=NOW)
+        self.assertEqual(len(self._missed(c)), 1, "the feed replays; the report must not")
 
-    def test_first_cycle_after_start_announces_nothing(self):
+    def test_first_cycle_after_start_reports_nothing(self):
         c = fresh_db()
         self._seed_elite(c)
-        trades = [self._buy(WALLET_A, mint_n(i), NOW - i) for i in range(50)]
-        pe.elite_buy_callouts(c, "sol", trades, NOW, since=0)
-        self.assertEqual(self._count(c), 0, "a fresh start must not replay the whole feed")
+        c.execute("INSERT INTO paper_cooldowns VALUES(?,?,?)", (MINT_A, "sol", NOW + 300))
+        pe.missed_elite_signals(c, "sol", [self._buy(WALLET_A, MINT_A, NOW)], NOW, since=0)
+        self.assertEqual(self._missed(c), [])
 
     def test_backlog_is_capped(self):
         c = fresh_db()
         self._seed_elite(c)
-        trades = [self._buy(WALLET_A, mint_n(i), NOW - i) for i in range(100)]
-        pe.elite_buy_callouts(c, "sol", trades, NOW, since=NOW - 100000)
-        self.assertLessEqual(self._count(c), pe.ELITE_CALLOUTS_MAX)
+        trades = []
+        for i in range(100):
+            m = mint_n(i)
+            c.execute("INSERT INTO paper_cooldowns VALUES(?,?,?)", (m, "sol", NOW + 300))
+            trades.append(self._buy(WALLET_A, m, NOW - i))
+        pe.missed_elite_signals(c, "sol", trades, NOW, since=NOW - 100000)
+        self.assertLessEqual(len(self._missed(c)), pe.ELITE_CALLOUTS_MAX)
 
     def test_sub_elite_wallet_is_ignored(self):
         c = fresh_db()
         self._seed_elite(c, WALLET_B, 0.75)
-        pe.elite_buy_callouts(c, "sol", [self._buy(WALLET_B, MINT_A, NOW)], NOW, since=NOW - 10)
-        self.assertEqual(self._count(c), 0)
+        c.execute("INSERT INTO paper_cooldowns VALUES(?,?,?)", (MINT_A, "sol", NOW + 300))
+        pe.missed_elite_signals(c, "sol", [self._buy(WALLET_B, MINT_A, NOW)], NOW, since=NOW - 10)
+        self.assertEqual(self._missed(c), [])
 
     def test_sells_are_ignored(self):
         c = fresh_db()
         self._seed_elite(c)
+        c.execute("INSERT INTO paper_cooldowns VALUES(?,?,?)", (MINT_A, "sol", NOW + 300))
         sell = self._buy(WALLET_A, MINT_A, NOW) | {"side": "sell"}
-        pe.elite_buy_callouts(c, "sol", [sell], NOW, since=NOW - 10)
-        self.assertEqual(self._count(c), 0)
+        pe.missed_elite_signals(c, "sol", [sell], NOW, since=NOW - 10)
+        self.assertEqual(self._missed(c), [])
 
 
 class ExitRobustnessTests(unittest.TestCase):
@@ -1396,7 +1543,7 @@ class AuthDefaultTests(unittest.TestCase):
         self.assertEqual(
             data,
             {"/api/overview", "/api/trades", "/api/wallets", "/api/weights",
-             "/api/events", "/api/equity"},
+             "/api/events", "/api/equity", "/api/attribution"},
             "a new endpoint must be considered for the auth gate",
         )
 
