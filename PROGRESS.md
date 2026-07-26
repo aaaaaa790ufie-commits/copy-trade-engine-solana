@@ -638,3 +638,51 @@ high-severity finding, again a regression from this work rather than an inherite
 bug. Two of the last three high-severity findings have been self-inflicted, which is
 worth stating plainly: the passes are catching my own changes as much as the original
 code. Pass 7 follows.
+
+## Pass 7 — 2026-07-26
+
+Lens: audit the tests themselves, and confirm the panel renders real data end to end.
+
+### Found and fixed
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 51 | Medium | An AST sweep of the suite for tests whose only assertion is "result is empty" found two that could pass for the wrong reason: `test_non_pump_launchpad_is_ignored` and `test_first_run_does_not_replay_the_journal`. A broken fixture produces the same empty result as the behaviour under test | Positive controls added to both | this pass |
+
+This is the same failure mode caught in Pass 2, where tightening address validation
+silently turned working tests into vacuous ones. The scan is worth keeping in mind:
+of 131 tests, 8 assert an empty result, and 6 of those are legitimate (documentation
+checks assert an empty list of violations, which is the point).
+
+The controls were verified to bite. Breaking `allowed()` to `return False` — so every
+cluster comes back empty — now fails `test_non_pump_launchpad_is_ignored`, which
+would previously have passed. All five `ClusterTests` fail, as they should. Reverted,
+working tree confirmed clean against git.
+
+### Checked and found sound
+
+The Mini App was loaded in a browser against the live database and renders in full:
+open position at −31.11% with entry, current, peak, stop and a 5h 8m expiry
+countdown; 11 closed trades; the wallet pool including the parked count added in
+Pass 4; and the engine parameters. Not an inference from a 200 response.
+
+### Verification
+
+```
+$ python -m unittest test_paper_engine
+Ran 131 tests in 9.592s
+OK
+```
+
+Stack healthy after the Pass 6 change: tunnel published, auth required, Mini App
+button installed, cycles at 7.9 s.
+
+### Still open
+
+`ISSUES.md` item 2 updated with current figures, because the situation has moved:
+equity 0.0311 SOL of an initial 0.1, and free balance 0.0139 against a 0.025 stake.
+Once the open position closes the engine will have too little to open another and
+will idle. That is a decision point, not a defect.
+
+**Confidence that `gmgn/` is production-ready: high.** Pass 7 found one issue, so it
+was not clean. Pass 8 follows.

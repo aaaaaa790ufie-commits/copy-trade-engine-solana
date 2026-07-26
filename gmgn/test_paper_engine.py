@@ -491,8 +491,13 @@ class ClusterTests(unittest.TestCase):
         self.assertIn(MINT_A, pe.cluster("sol", trades, {WALLET_B: 0.25}, NOW))
 
     def test_non_pump_launchpad_is_ignored(self):
-        t = self._t(WALLET_A, MINT_A, "buy", NOW) | {"launchpad": "raydium"}
-        self.assertEqual(pe.cluster("sol", [t], {WALLET_A: 0.25}, NOW), {})
+        raydium = self._t(WALLET_A, MINT_A, "buy", NOW) | {"launchpad": "raydium"}
+        self.assertEqual(pe.cluster("sol", [raydium], {WALLET_A: 0.25}, NOW), {})
+        # Positive control: the identical trade on pump.fun does land, so an empty
+        # result above means the launchpad filter fired and not that the fixture is
+        # malformed and was rejected somewhere earlier.
+        pump = self._t(WALLET_A, MINT_A, "buy", NOW)
+        self.assertIn(MINT_A, pe.cluster("sol", [pump], {WALLET_A: 0.25}, NOW))
 
     def test_published_score_matches_the_entry_decision(self):
         c = fresh_db()
@@ -1516,6 +1521,11 @@ class BotPushTests(unittest.TestCase):
         self.bot.catch_up(c)
         self.bot.push_events(c)
         self.assertEqual(self.sent, [], "a first start must not dump the whole history")
+        # Positive control: an event raised *after* the cursor was set does go out, so
+        # the silence above is the cursor working rather than the push path being dead.
+        self._events(c, 1)
+        self.bot.push_events(c)
+        self.assertEqual(len(self.sent), 1, "new events must still be delivered")
 
     def test_restart_delivers_events_missed_while_down(self):
         c = fresh_db()

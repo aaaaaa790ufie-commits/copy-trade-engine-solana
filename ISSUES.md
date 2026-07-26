@@ -38,25 +38,37 @@ unverified can enter the pool in the meantime.
 
 ---
 
-## 2. The strategy loses money, and that is not a bug in the code
+## 2. The strategy loses money, and the account is nearly out of runway
 
-**Status:** reported, no action taken. Needs a decision.
+**Status:** reported, no action taken. Needs a decision, and fairly soon.
 
-As of 2026-07-26 the paper account is at ~0.006 SOL of an initial 0.1, across 10
-closed trades with 4 winners. The engine now does what it was specified to do —
-the earlier −99.99% exits were a real defect and are fixed — but doing it
-correctly is still unprofitable at the current settings.
+As of 2026-07-26 18:15 UTC the paper account stands at **0.0311 SOL equity** against
+an initial 0.1 — down 68.9% — across 11 closed trades, 5 winners and 6 losers.
+Free balance is **0.0139 SOL against a 0.025 stake**, so once the open position
+closes the engine will have too little to open another and will simply idle. The
+panel already reports `БЕЗ СВОБОДНЫХ СРЕДСТВ`.
 
-The dominant parameter is `GMGN_ENTRY_SCORE=0.25`, which equals the weight of a
+The engine now does what it was specified to do — the earlier −99.99% exits were a
+real defect and are fixed — but doing it correctly is still unprofitable at these
+settings.
+
+The dominant parameter is `GMGN_ENTRY_SCORE=0.25`, which is exactly the weight of a
 single wallet at 70%+. "Weighted convergence" therefore reduces to "follow one
-wallet", with no convergence required at all. Raising it to 0.3125 would require
-one 70% wallet plus one 50%+ wallet; 0.5 would require two 70% wallets.
+wallet", with no convergence required at all — every entry so far was triggered by
+`wallets=1`. Raising it to 0.3125 would require one 70% wallet plus one 50%+ wallet;
+0.5 would require two 70% wallets.
 
-**Not done automatically because** entry threshold, stake and stop distances are
-risk parameters, and were explicitly placed off-limits without approval.
+**Three separate decisions, none of which are mine to make:**
 
-A backtest over `paper_trades` would quantify this rather than guess, but the
-sample (10 closed trades) is far too small to conclude anything yet.
+1. Raise `GMGN_ENTRY_SCORE` so convergence actually means convergence.
+2. Reset the paper account to a fresh budget, so the next configuration is measured
+   from a clean start rather than from a depleted one.
+3. Whether 11 trades justifies changing anything at all — it does not, statistically.
+   The honest read is that the sample is too small to distinguish a bad strategy from
+   an unlucky one, and the fix for that is more trades, not more tuning.
+
+**Not done automatically because** entry threshold, stake, stop distances and the
+account balance were explicitly placed off-limits without approval.
 
 ---
 
