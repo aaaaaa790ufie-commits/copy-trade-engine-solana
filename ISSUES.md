@@ -255,3 +255,44 @@ two −99.99% exits. A larger cap moves back toward that failure.
 **Not done automatically because** it trades a documented, previously-realised risk to
 capital against an accuracy improvement, and the exchange rate is a judgement about how
 much staleness matters — which the eleven-trade sample cannot settle either way.
+
+---
+
+## 9. A copy of the trading database is in this public repository's history
+
+**Status:** stopped going forward. Removing it from history needs a decision.
+
+`reset_account.py` and `unban_wallets.py` take a SQLite backup before they write,
+named `<db>.<timestamp>.bak`. `.gitignore` covered `*.db` but not `*.bak`, so
+`sentinel.db.1785082118.bak` was committed in `4a64c70` and pushed. The repository is
+public (`visibility: public`, confirmed via the GitHub API).
+
+What that file contains:
+
+| | rows |
+|---|---:|
+| `wallet_watch` — the wallets being followed | 1190 |
+| `wallet_blacklist` | 5568 |
+| `paper_trades` | 23 |
+| `engine_events` | 509 |
+
+**No credentials.** Verified directly: `engine_state` holds only `last_cycle` and
+`maint_sol`, and no table in the schema stores a token, key or secret.
+
+**What it does expose:** the watch list. For a copy-trading engine that is the strategy
+— which wallets to follow is precisely what the system spends its API budget
+discovering, and it is published in full, along with the account's trade-by-trade
+history.
+
+**Fixed going forward:** `.gitignore` now covers `*.bak` and the `*-shm` / `*-wal`
+sidecars (which `*.db-shm` never matched for a `.bak` file), and the file is untracked
+via `git rm --cached` with the local copy left in place.
+
+**Not done automatically:** the blob is still reachable in history. Removing it means a
+`filter-branch`/`filter-repo` rewrite and a force-push, exactly as was done for the
+leaked bot token. That was justified by a live credential; this is not one, and a
+history rewrite invalidates every existing clone and checksum. Whether the watch list is
+worth that is the operator's judgement, not mine.
+
+**If you want it gone**, the same procedure as the token purge applies, and every branch
+must be verified afterwards. Say so and I will run it.

@@ -37,10 +37,21 @@ logs/
 *.db-shm
 *.db-wal
 *.sqlite
+# reset_account.py and unban_wallets.py write "<db>.<timestamp>.bak" beside the
+# database before they touch it. Those end in .bak, so *.db never matched them and one
+# was committed to this public repo — 1190 watched wallets, 5568 blacklist entries and
+# the full trade history. In a copy-trading system the watch list is the strategy.
+*.bak
+# WAL sidecars follow the database's own name, so *.db-shm only ever covered the main
+# file — opening a .bak read-only produces .bak-shm and .bak-wal beside it.
+*-shm
+*-wal
 .venv/
 
 # --- Sentinel secrets (WARP/WireGuard keys) ---
 sentinel-secrets/
 
-# Telegram bot read cursor (local runtime state)
+# Telegram bot read cursor (local runtime state). The sibling temp file exists only
+# between mkstemp and os.replace, but a crash in that window would leave one behind.
 bot_state.json
+.bot_state.*.tmp
