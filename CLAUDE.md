@@ -132,6 +132,18 @@ def weight(winrate: float) -> float:
 whenever `WEBAPP_PUBLIC_URL` is set; the signature is pinned to
 `TELEGRAM_CHAT_ID` so only the owner can read the panel through a tunnel.
 
+`gmgn/tunnel.py` publishes it over HTTPS (`supervisor.py --tunnel`). **This
+network cannot use cloudflared** — TCP to `region1.v2.argotunnel.com:7844`
+connects, but the TLS handshake to the edge is reset (`EOF`), and cloudflared's
+own precheck reports both UDP and TCP connectivity as failed. `pinggy` over
+ssh:443 works; `TUNNEL_PROVIDER=auto` falls through to it. Free pinggy sessions
+expire hourly with a new hostname, so `Tunnel.watch()` reconnects and the
+supervisor restarts the bot to re-install the button.
+
+Readiness must come from the provider's "connection registered" line, not from
+the hostname it prints first — cloudflared prints the URL seconds before the
+tunnel serves, and using it yields HTTP 530.
+
 ## Tests
 
 ```bash

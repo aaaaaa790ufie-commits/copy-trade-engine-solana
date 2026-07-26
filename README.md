@@ -80,13 +80,17 @@ Telegram commands: `/status`, `/positions`, `/trades`, `/wallets`, `/weights`, `
 Telegram only opens Mini Apps over HTTPS, so the panel needs a public origin:
 
 ```bash
-npm install -g cloudflared
 python gmgn/supervisor.py --tunnel
 ```
 
-That opens a Cloudflare quick tunnel, hands the generated `https://…trycloudflare.com` URL to the bot, and installs the panel as the chat's menu button and as a keyboard button. The URL is regenerated on every run, so nothing needs pinning in `.env`.
+That publishes the panel, hands the URL to the bot, and installs it as the chat's menu button and as a keyboard button. The URL is issued fresh on each connect, so nothing needs pinning in `.env` — when it changes, the bot is restarted with the new one.
 
-Quick tunnels prefer QUIC on outbound UDP 7844; networks that drop it fall back to HTTP/2 over TCP 443 automatically (`TUNNEL_PROTOCOLS` controls the order).
+Two providers, tried in order (`TUNNEL_PROVIDER` = `auto` | `cloudflared` | `pinggy`):
+
+| Provider | Requires | Notes |
+|---|---|---|
+| `cloudflared` | `npm install -g cloudflared` | Needs outbound 7844. Some networks complete the TCP connect but reset the TLS handshake to the edge (`TLS handshake with edge error: EOF`) — those cannot use it, whichever `TUNNEL_PROTOCOLS` value you pick. |
+| `pinggy` | `ssh` (already present) | Rides SSH on 443, so it works where the above is filtered. Free sessions expire after 60 minutes and reconnect with a new hostname. |
 
 If you already have a domain or VPS, skip the tunnel and set `WEBAPP_PUBLIC_URL` in `.env` instead.
 

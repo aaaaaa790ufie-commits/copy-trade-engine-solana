@@ -121,22 +121,38 @@ def main() -> None:
 
     py = sys.executable
     tunnel = None
+    children: list[Child] = []
+
+    def publish(url: str) -> None:
+        """Point every component at a newly issued public URL.
+
+        Children read it from the environment, so the bot installs the Mini App
+        button and the webapp turns on initData verification without anyone editing
+        .env by hand. A free pinggy session expires hourly with a different
+        hostname, so the bot is restarted to pick the new one up.
+        """
+        os.environ["WEBAPP_PUBLIC_URL"] = url
+        os.environ["WEBAPP_REQUIRE_AUTH"] = "1"
+        config.WEBAPP_PUBLIC_URL = url
+        LOG.info("Mini App published at %s", url)
+        for child in children:
+            if child.name in ("bot", "webapp") and child.proc and child.proc.poll() is None:
+                LOG.info("restarting %s for the new public URL", child.name)
+                child.stop()  # the supervise loop notices the exit and restarts it
+
     if args.tunnel and not args.no_webapp:
         from tunnel import Tunnel
 
         tunnel = Tunnel(config.WEBAPP_PORT)
         url = tunnel.start()
         if url:
-            # Children read this from the environment, so the bot installs the button
-            # and the webapp switches auth on without anyone editing .env by hand.
             os.environ["WEBAPP_PUBLIC_URL"] = url
             os.environ["WEBAPP_REQUIRE_AUTH"] = "1"
             config.WEBAPP_PUBLIC_URL = url
-            LOG.info("Mini App published at %s", url)
+            LOG.info("Mini App published at %s (%s)", url, tunnel.active_provider)
         else:
             LOG.warning("tunnel unavailable — the Mini App stays local-only")
 
-    children: list[Child] = []
     if not args.no_engine:
         children.append(Child("engine", [py, "-u", str(HERE / "run_engine.py")]))
     if not args.no_webapp:
@@ -152,11 +168,13 @@ def main() -> None:
     LOG.info("config: %s", config.ENV_PATH)
     LOG.info("mini app: http://%s:%d%s", config.WEBAPP_HOST, config.WEBAPP_PORT,
              f"  (public {config.WEBAPP_PUBLIC_URL})" if config.WEBAPP_PUBLIC_URL else "")
+    if tunnel and tunnel.url:
+        tunnel.watch(publish)
     try:
         supervise(children)
     finally:
         if tunnel:
-            tunnel.stop()
+            tunnel.close()
 
 
 if __name__ == "__main__":

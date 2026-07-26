@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""Expose the local Mini App over HTTPS via a Cloudflare quick tunnel.
+"""Expose the local Mini App over HTTPS.
 
 Telegram refuses to open a Mini App unless the URL is https, so the panel needs a
-public origin. This wraps `cloudflared tunnel --url`, waits for the generated
-`https://….trycloudflare.com` hostname, and hands it back to the caller.
+public origin. Two providers are supported and `auto` tries them in order:
 
-The URL is ephemeral: a new one is issued every run, which is why the supervisor
-pushes it to the bot at startup rather than expecting it to be pinned in .env.
+  cloudflared  `cloudflared tunnel --url` -> https://….trycloudflare.com
+               Needs outbound 7844. Some networks pass the TCP connect but reset
+               the TLS handshake to the Cloudflare edge, which shows up as
+               "TLS handshake with edge error: EOF" — that network cannot use it.
 
-    python gmgn/tunnel.py            # print the URL and keep the tunnel open
+  pinggy       `ssh -p 443 -R0:…` -> https://….pinggy.link
+               Rides SSH on 443, so it survives networks that filter the above.
+               Free sessions expire after 60 minutes with a fresh URL each time,
+               which is why the supervisor re-publishes on every reconnect.
+
+    python gmgn/tunnel.py                  # print the URL and hold it open
+    TUNNEL_PROVIDER=pinggy python gmgn/tunnel.py
 """
 from __future__ import annotations
 
@@ -18,6 +25,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -26,83 +34,94 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
 
 LOG = logging.getLogger("tunnel")
-URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
-# cloudflared prints the hostname before it has an edge connection, so waiting on the
-# URL alone yields a URL that answers HTTP 530. Registration is the real ready signal.
-REGISTERED_RE = re.compile(r"Registered tunnel connection|Connection [0-9a-f-]+ registered")
+
+CF_URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+# cloudflared prints the hostname several seconds before it has an edge connection;
+# waiting on the hostname alone yields a URL that answers HTTP 530.
+CF_READY_RE = re.compile(r"Registered tunnel connection|Connection [0-9a-f-]+ registered")
+PINGGY_URL_RE = re.compile(r"https://[a-z0-9.-]+\.(?:pinggy\.link|pinggy-free\.link|free\.pinggy\.net)")
+
 START_TIMEOUT = config.get_int("TUNNEL_START_TIMEOUT", 45)
-# quic needs outbound UDP 7844, which plenty of networks drop; http2 rides TCP 443.
-PROTOCOLS = [p.strip() for p in config.get("TUNNEL_PROTOCOLS", "quic,http2").split(",") if p.strip()]
+PROVIDER = config.get("TUNNEL_PROVIDER", "auto").strip().lower()
+# quic needs outbound UDP 7844; http2 rides TCP 7844. Both are commonly filtered.
+CF_PROTOCOLS = [p.strip() for p in config.get("TUNNEL_PROTOCOLS", "quic,http2").split(",") if p.strip()]
+PINGGY_HOST = config.get("PINGGY_HOST", "a.pinggy.io")
 
 
-def find_cloudflared() -> str | None:
-    for name in ("cloudflared", "cloudflared.exe", "cloudflared.cmd"):
+def _which(*names: str, npm_fallback: str = "") -> str | None:
+    for name in names:
         found = shutil.which(name)
         if found:
             return found
     # npm's global bin is often absent from a non-login shell's PATH on Windows.
-    if os.name == "nt":
+    if npm_fallback and os.name == "nt":
         for suffix in ("cmd", "exe"):
-            candidate = os.path.expandvars(rf"%APPDATA%\npm\cloudflared.{suffix}")
+            candidate = os.path.expandvars(rf"%APPDATA%\npm\{npm_fallback}.{suffix}")
             if os.path.isfile(candidate):
                 return candidate
     return None
 
 
+def find_cloudflared() -> str | None:
+    return _which("cloudflared", "cloudflared.exe", "cloudflared.cmd", npm_fallback="cloudflared")
+
+
+def find_ssh() -> str | None:
+    return _which("ssh", "ssh.exe")
+
+
 class Tunnel:
-    def __init__(self, port: int | None = None):
+    """A single public HTTPS origin for the local Mini App port."""
+
+    def __init__(self, port: int | None = None, provider: str = ""):
         self.port = port or config.WEBAPP_PORT
+        self.provider = (provider or PROVIDER).lower()
         self.proc: subprocess.Popen | None = None
         self.url: str = ""
+        self.active_provider: str = ""
         self._ready = threading.Event()
+        self._stopping = threading.Event()
+
+    # -- public API ---------------------------------------------------------
 
     def start(self) -> str:
-        """Launch cloudflared and return a URL that actually serves, or "" on failure.
-
-        Each transport in PROTOCOLS is tried in turn: a network that blocks outbound
-        UDP 7844 fails quic but works over http2.
-        """
-        exe = find_cloudflared()
-        if not exe:
-            LOG.warning("cloudflared not found — install it to publish the Mini App "
-                        "(npm install -g cloudflared)")
-            return ""
-        for protocol in PROTOCOLS:
-            if self._attempt(exe, protocol):
+        """Bring up a tunnel and return a URL that actually serves, or "" on failure."""
+        order = ["cloudflared", "pinggy"] if self.provider == "auto" else [self.provider]
+        for name in order:
+            attempt = getattr(self, f"_start_{name}", None)
+            if attempt is None:
+                LOG.error("unknown tunnel provider: %s", name)
+                continue
+            if attempt():
+                self.active_provider = name
                 return self.url
-            LOG.warning("tunnel over %s did not connect", protocol)
+            LOG.warning("%s did not establish a tunnel", name)
             self.stop()
-        LOG.error("could not establish a tunnel over any of: %s", ", ".join(PROTOCOLS))
+        LOG.error("no tunnel provider succeeded (tried: %s)", ", ".join(order))
         return ""
 
-    def _attempt(self, exe: str, protocol: str) -> bool:
-        self.url = ""
-        self._ready.clear()
-        LOG.info("starting tunnel (protocol=%s)", protocol)
-        self.proc = subprocess.Popen(
-            [exe, "tunnel", "--no-autoupdate", "--protocol", protocol,
-             "--url", f"http://127.0.0.1:{self.port}"],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace", bufsize=1,
-        )
-        threading.Thread(target=self._read, daemon=True, name=f"tunnel-{protocol}").start()
-        return self._ready.wait(START_TIMEOUT) and bool(self.url)
+    def watch(self, on_url: "callable[[str], None]") -> threading.Thread:
+        """Restart the tunnel whenever it drops, reporting each new URL.
 
-    def _read(self) -> None:
-        proc = self.proc
-        if not proc or not proc.stdout:
-            return
-        for line in proc.stdout:
-            if not self.url:
-                m = URL_RE.search(line)
-                if m:
-                    self.url = m.group(0)
-            if self.url and not self._ready.is_set() and REGISTERED_RE.search(line):
-                LOG.info("tunnel up: %s", self.url)
-                self._ready.set()
-            # cloudflared is chatty; only surface problems once we are connected.
-            if self._ready.is_set() and "ERR" in line:
-                LOG.warning("cloudflared: %s", line.rstrip())
+        Free pinggy sessions expire on the hour with a different hostname, so the
+        URL is not stable for the lifetime of the process.
+        """
+
+        def loop():
+            while not self._stopping.is_set():
+                if self.proc and self.proc.poll() is None:
+                    self._stopping.wait(5)
+                    continue
+                LOG.warning("tunnel dropped — reconnecting")
+                previous = self.url
+                if self.start() and self.url != previous:
+                    on_url(self.url)
+                elif not self.url:
+                    self._stopping.wait(30)
+
+        t = threading.Thread(target=loop, daemon=True, name="tunnel-watch")
+        t.start()
+        return t
 
     def stop(self) -> None:
         if self.proc and self.proc.poll() is None:
@@ -111,6 +130,74 @@ class Tunnel:
                 self.proc.wait(timeout=10)
             except Exception:
                 self.proc.kill()
+
+    def close(self) -> None:
+        self._stopping.set()
+        self.stop()
+
+    # -- providers ----------------------------------------------------------
+
+    def _start_cloudflared(self) -> bool:
+        exe = find_cloudflared()
+        if not exe:
+            LOG.info("cloudflared not installed (npm install -g cloudflared)")
+            return False
+        for protocol in CF_PROTOCOLS:
+            LOG.info("trying cloudflared (protocol=%s)", protocol)
+            if self._spawn(
+                [exe, "tunnel", "--no-autoupdate", "--protocol", protocol,
+                 "--url", f"http://127.0.0.1:{self.port}"],
+                CF_URL_RE, CF_READY_RE,
+            ):
+                return True
+            self.stop()
+        return False
+
+    def _start_pinggy(self) -> bool:
+        exe = find_ssh()
+        if not exe:
+            LOG.info("ssh not available — cannot use pinggy")
+            return False
+        LOG.info("trying pinggy over ssh:443")
+        # Not os.devnull: OpenSSH on Windows treats "nul" as a relative path and
+        # creates a literal file called `nul` in the working directory, which then
+        # cannot be removed or indexed by git without a \\?\ prefix.
+        known_hosts = Path(tempfile.gettempdir()) / "sentinel_known_hosts"
+        return self._spawn(
+            [exe, "-o", "StrictHostKeyChecking=no", "-o", f"UserKnownHostsFile={known_hosts}",
+             "-o", "ServerAliveInterval=30", "-o", "ExitOnForwardFailure=yes",
+             "-o", "ConnectTimeout=20", "-T", "-p", "443",
+             f"-R0:127.0.0.1:{self.port}", PINGGY_HOST],
+            PINGGY_URL_RE, PINGGY_URL_RE,
+        )
+
+    # -- process plumbing ---------------------------------------------------
+
+    def _spawn(self, argv: list[str], url_re: re.Pattern, ready_re: re.Pattern) -> bool:
+        self.url = ""
+        self._ready.clear()
+        self.proc = subprocess.Popen(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
+        )
+        threading.Thread(target=self._read, args=(url_re, ready_re), daemon=True, name="tunnel-log").start()
+        return self._ready.wait(START_TIMEOUT) and bool(self.url)
+
+    def _read(self, url_re: re.Pattern, ready_re: re.Pattern) -> None:
+        proc = self.proc
+        if not proc or not proc.stdout:
+            return
+        for line in proc.stdout:
+            if not self.url:
+                m = url_re.search(line)
+                if m:
+                    self.url = m.group(0)
+            if self.url and not self._ready.is_set() and ready_re.search(line):
+                LOG.info("tunnel up: %s", self.url)
+                self._ready.set()
+            # These tools are chatty; only surface problems once we are connected.
+            if self._ready.is_set() and "ERR" in line:
+                LOG.warning("tunnel: %s", line.rstrip())
 
 
 def main() -> None:
@@ -127,7 +214,7 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        t.stop()
+        t.close()
 
 
 if __name__ == "__main__":
