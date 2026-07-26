@@ -309,6 +309,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Inspect or populate the repo-local .env")
     ap.add_argument("--import-gmgn", action="store_true", help="copy ~/.config/gmgn/.env into the repo .env")
     args = ap.parse_args()
+    # summary() prints ENV_PATH, and a Windows profile directory can hold any character
+    # the user's name does. This module defines the helper, which is exactly why it was
+    # the last entrypoint left not calling it.
+    use_utf8_stdio()
     if args.import_gmgn:
         import_gmgn_credentials()
         return

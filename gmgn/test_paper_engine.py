@@ -2722,16 +2722,26 @@ class ConfigParsingTests(unittest.TestCase):
         # mass_discovery.py was the one that had never called it, and it is the one
         # whose run takes thousands of API calls to reach the line that would kill it.
         root = pathlib.Path(config.ROOT) / "gmgn"
-        missing = []
+        missing, checked = [], 0
         for path in sorted(root.glob("*.py")):
             if path.name.startswith("test_"):
                 continue
             source = path.read_text(encoding="utf-8")
             if "def main(" not in source:
                 continue
-            if "use_utf8_stdio()" not in source:
+            # A *call*, not any mention. Searching the whole source passed config.py on
+            # the strength of its own `def use_utf8_stdio() -> None:` line, so the one
+            # file that defines the helper was the one file exempt from using it — a
+            # guard that cannot fire, which is worse than none.
+            called = [line for line in source.splitlines()
+                      if "use_utf8_stdio()" in line and not line.lstrip().startswith("def ")]
+            checked += 1
+            if not called:
                 missing.append(path.name)
         self.assertEqual(missing, [], "these entrypoints would die on a cp1251 console")
+        # Otherwise a broken glob or a moved directory turns this into a test that
+        # passes by examining nothing.
+        self.assertGreaterEqual(checked, 8, f"only {checked} entrypoints found — is the path right?")
 
     def test_missing_file_is_empty_not_an_error(self):
         self.assertEqual(config._parse_env_file(pathlib.Path("no-such-file.env")), {})
