@@ -1774,6 +1774,91 @@ class OperatorFacingLabelTests(unittest.TestCase):
             pe.TOP_WINRATE = saved
 
 
+class FeedHealthTests(unittest.TestCase):
+    """A cycling loop and a working engine are different states.
+
+    heartbeat() is written on every pass, including one where every feed call failed, so
+    /status reported LIVE while the engine fetched nothing and could not have entered or
+    priced anything. Feed health is now recorded and reported separately.
+    """
+
+    def setUp(self):
+        self._saved = {k: getattr(pe, k) for k in ("cli", "CHAINS", "token_price")}
+        pe.CHAINS = ["sol"]
+        pe._last_maint.clear()
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(pe, k, v)
+        pe._last_maint.clear()
+
+    def _trade(self):
+        return {"maker": WALLET_A, "base_address": MINT_A, "side": "buy",
+                "timestamp": NOW, "price_usd": 1.0, "launchpad": "pump"}
+
+    def test_a_fresh_database_is_not_reported_as_stale(self):
+        # Nothing recorded yet is not evidence of a problem.
+        self.assertTrue(pe.feed_is_fresh(fresh_db()))
+
+    def test_a_working_feed_is_recorded(self):
+        c = fresh_db()
+        pe.cli = lambda args: [self._trade()]
+        pe.token_price = lambda ch, m: 1.0
+        pe.cycle(c)
+        self.assertGreaterEqual(pe.last_feed_ts(c), NOW)
+        self.assertTrue(pe.feed_is_fresh(c))
+
+    def test_a_failing_feed_leaves_the_last_success_untouched(self):
+        c = fresh_db()
+        pe.cli = lambda args: [self._trade()]
+        pe.token_price = lambda ch, m: 1.0
+        pe.cycle(c)
+        recorded = pe.last_feed_ts(c)
+
+        def broken(args):
+            raise RuntimeError("network down")
+
+        pe.cli = broken
+        pe.cycle(c)
+        self.assertEqual(pe.last_feed_ts(c), recorded, "a failed poll must not count as success")
+        self.assertGreaterEqual(pe.last_cycle_ts(c), recorded, "but the loop still heartbeats")
+
+    def test_a_prolonged_outage_reads_as_stale(self):
+        c = fresh_db()
+        pe.cli = lambda args: [self._trade()]
+        pe.token_price = lambda ch, m: 1.0
+        pe.cycle(c)
+        later = time.time() + max(pe.FEED_STALE_AFTER, pe.POLL * 6) + 1
+        self.assertFalse(pe.feed_is_fresh(c, later))
+        self.assertTrue(pe.feed_is_fresh(c, time.time()))
+
+    def test_an_empty_but_successful_feed_is_not_a_success(self):
+        # The API answering with nothing is indistinguishable from having no data, and
+        # either way there is nothing to act on.
+        c = fresh_db()
+        pe.cli = lambda args: []
+        pe.cycle(c)
+        self.assertEqual(pe.last_feed_ts(c), 0)
+
+    def test_status_distinguishes_stopped_from_blind(self):
+        import telegram_bot as bot
+        c = fresh_db()
+        pe.cli = lambda args: [self._trade()]
+        pe.token_price = lambda ch, m: 1.0
+        pe.cycle(c)
+
+        saved = pe.feed_is_fresh
+        try:
+            pe.feed_is_fresh = lambda conn, now=None: False
+            out = bot.reply(c, "/status")
+            self.assertIn("НЕТ ДАННЫХ", out)
+            self.assertNotIn("🟢 LIVE", out, "blind is not live")
+        finally:
+            pe.feed_is_fresh = saved
+
+        self.assertIn("🟢 LIVE", bot.reply(c, "/status"))
+
+
 class NoHardcodedThresholdsTests(unittest.TestCase):
     """No operator-facing text may spell out a number that also lives in code.
 

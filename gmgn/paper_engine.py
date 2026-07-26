@@ -450,6 +450,20 @@ def realised_since(c,ts):
  strategy's loss to the new one on its first reading."""
  row=c.execute("SELECT COALESCE(SUM(pnl_sol),0),COUNT(*) FROM paper_trades WHERE action='EXIT' AND event_ts>?",(ts,)).fetchone()
  return (row[0] or 0.0),(row[1] or 0)
+FEED_STALE_AFTER=config.get_int("GMGN_FEED_STALE_SECONDS",300)
+def last_feed_ts(c):
+ """When the feed last returned anything, or 0 if it never has this run."""
+ try:
+  row=c.execute("SELECT updated_at FROM engine_state WHERE key='last_feed_ok'").fetchone()
+  return row[0] if row else 0
+ except sqlite3.OperationalError: return 0
+def feed_is_fresh(c,now=None):
+ """False when the loop is cycling but the feed has returned nothing for a while.
+
+ Reported separately from liveness so "running" cannot be mistaken for "working"."""
+ last=last_feed_ts(c)
+ if not last: return True   # nothing recorded yet; do not cry wolf on a fresh database
+ return (now or time.time())-last < max(FEED_STALE_AFTER,POLL*6)
 def last_cycle_ts(c):
  """Unix ts of the last completed cycle, 0 if the engine has never run.
 
@@ -499,10 +513,12 @@ def missed_elite_signals(c,chain,trades,now,since,just_opened=()):
   if sent>=ELITE_CALLOUTS_MAX:
    LOG.info("missed-signal reports capped at %d this cycle on %s",ELITE_CALLOUTS_MAX,chain); return
 def cycle(c):
- now=int(time.time()); since=last_cycle_ts(c)
+ now=int(time.time()); since=last_cycle_ts(c); got_feed=False
  for chain in CHAINS:
   # 1. Feed first — one fast call, and the only hard dependency of the exit path.
-  try: trades=list_rows(cli(["track","smartmoney","--chain",chain,"--limit",str(LIMIT)]))
+  try:
+   trades=list_rows(cli(["track","smartmoney","--chain",chain,"--limit",str(LIMIT)]))
+   got_feed=got_feed or bool(trades)
   except Exception as e:
    LOG.warning("feed %s: %s",chain,e); trades=[]
   # 2. Stops before anything else. Nothing slow may run ahead of this.
@@ -522,7 +538,13 @@ def cycle(c):
    _last_maint[chain]=now
    c.execute("INSERT INTO engine_state(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(f"maint_{chain}",str(now),now))
    refresh_wallet_stats(c,chain,now); discover_wallets(c,chain,now); cleanup_wallets(c,chain,now)
- heartbeat(c,now); c.commit()
+ heartbeat(c,now)
+ # A running loop and a working engine are different things. Without this the heartbeat
+ # alone reported LIVE through a feed outage, while the engine fetched nothing and could
+ # not have entered or priced anything.
+ if got_feed:
+  c.execute("INSERT INTO engine_state(key,value,updated_at) VALUES('last_feed_ok',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(str(now),now))
+ c.commit()
  LOG.info("[cycle] %.1fs wallets=%d open=%d",time.time()-now,c.execute("SELECT COUNT(*) FROM wallet_watch").fetchone()[0],c.execute("SELECT COUNT(*) FROM paper_positions WHERE status='open'").fetchone()[0])
 MAX_CYCLE_FAILURES=config.get_int("GMGN_MAX_CYCLE_FAILURES",5)
 def run_forever(c,once=False):

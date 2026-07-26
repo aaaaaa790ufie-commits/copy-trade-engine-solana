@@ -296,6 +296,8 @@ def api_overview() -> dict:
             "wallets_avg_winrate_pct": (wallets["avg"] or 0) * 100,
             "prices_age": int(time.time() - _prices_at) if _prices_at else None,
             "engine_alive": engine_alive(c),
+            "feed_fresh": pe.feed_is_fresh(c),
+            "last_feed_ok": pe.last_feed_ts(c),
             "engine_last_cycle": engine_heartbeat(c),
             "config": {
                 "entry_score": config.ENTRY_SCORE, "stake_sol": config.STAKE_SOL,

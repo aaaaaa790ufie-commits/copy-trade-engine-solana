@@ -262,8 +262,20 @@ def text(c: sqlite3.Connection, command: str) -> str:
         def worst(s):
             return "{:+.2f}%".format(s["worst_pct"]) if s["closed"] else "—"
 
+        # Three states, not two: the loop can be cycling while the feed returns nothing,
+        # in which case the engine cannot enter or price anything and saying LIVE would
+        # be misleading.
+        fresh = pe.feed_is_fresh(c)
+        if bankrupt:
+            state = "💀 БАНКРОТ"
+        elif not alive:
+            state = "🔴 ДВИЖОК СТОИТ"
+        elif not fresh:
+            state = "🟡 НЕТ ДАННЫХ ОТ GMGN"
+        else:
+            state = "🟢 LIVE"
         out = [
-            "💀 БАНКРОТ" if bankrupt else "🟢 LIVE" if alive else "🔴 ДВИЖОК СТОИТ",
+            state,
             f"Баланс: {balance:.5f} SOL",
         ]
         if reset_at:

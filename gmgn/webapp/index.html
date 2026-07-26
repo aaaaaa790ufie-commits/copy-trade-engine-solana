@@ -166,8 +166,11 @@ function renderAuthWall(){
 /* ---------------- header ---------------- */
 function renderHero(d){
   const hero = document.getElementById("hero");
+  // Cycling and working are different states: the loop can be alive while the feed
+  // returns nothing, and then nothing can be entered or priced.
   const badge = d.bankrupt ? ["dead","БАНКРОТ"]
               : !d.engine_alive ? ["dead","ДВИЖОК СТОИТ"]
+              : d.feed_fresh === false ? ["warn","НЕТ ДАННЫХ"]
               : !d.can_open ? ["warn","БЕЗ СВОБОДНЫХ СРЕДСТВ"]
               : ["live","LIVE"];
   hero.querySelector(".equity").innerHTML = `${d.equity_sol.toFixed(5)}<small>SOL</small>`;
