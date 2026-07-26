@@ -32,6 +32,37 @@ WEBAPP_URL = config.WEBAPP_PUBLIC_URL if config.WEBAPP_PUBLIC_URL.startswith("ht
 
 PUSH_KINDS = ("ENTRY", "EXIT", "WALLET", "MISSED", "BANKRUPT", "RECOVERY", "ERROR", "STUCK", "DEPOSIT")
 
+# Kinds worth seeing, but not every time. Wallet bookkeeping fires whenever the pool
+# grows by even one address: 60 messages in a day against 4 entries and 4 exits, each
+# reading "+1 новых, всего 1275". That buries the eight that matter under a 7:1 ratio of
+# ones that do not. Throttled at push time rather than at emit, so the journal, the
+# panel's feed and /wallets stay complete — only the notification is thinned, and the
+# message already carries the running total, so the one that does go out says everything
+# the seven it replaces did. Set to 0 to push every one.
+WALLET_PUSH_INTERVAL = config.get_int("TELEGRAM_WALLET_PUSH_SECONDS", 3600)
+PUSH_INTERVALS = {"WALLET": WALLET_PUSH_INTERVAL}
+_last_pushed_at: dict[str, float] = {}
+
+
+def due_for_push(kind: str, now: float) -> bool:
+    """Whether this kind may be sent now, given its throttle. Stateful: records the send.
+
+    Only throttled kinds are affected; ENTRY, EXIT, ERROR and the rest are never
+    delayed, because those are the ones the operator is waiting for.
+    """
+    interval = PUSH_INTERVALS.get(kind, 0)
+    if interval <= 0:
+        return True
+    last = _last_pushed_at.get(kind)
+    # None is "never sent", not "sent at the epoch". Defaulting to 0.0 and subtracting
+    # gives the right answer against a real clock only because time.time() dwarfs any
+    # interval — it would suppress the first message of every kind under any other
+    # clock, which is a coincidence holding the behaviour up rather than a rule.
+    if last is not None and now - last < interval:
+        return False
+    _last_pushed_at[kind] = now
+    return True
+
 
 def api(method: str, data: dict | None = None) -> dict:
     url = f"https://api.telegram.org/bot{TOKEN}/{method}"
@@ -175,7 +206,7 @@ def push_events(c: sqlite3.Connection) -> None:
         (_last_event, PUSH_BATCH),
     ).fetchall()
     for eid, kind, msg in rows:
-        if kind in PUSH_KINDS:
+        if kind in PUSH_KINDS and due_for_push(kind, time.time()):
             try:
                 api("sendMessage", {"chat_id": CHAT, "text": f"{ICONS.get(kind, '•')} {kind}: {msg}"})
                 time.sleep(0.35)

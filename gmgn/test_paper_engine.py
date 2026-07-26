@@ -2995,6 +2995,61 @@ class FakeProc:
         self.returncode = code
 
 
+class PushThrottleTests(unittest.TestCase):
+    """Wallet bookkeeping outnumbered entries and exits 60 to 8 in a day, and every one
+    of them was a push notification. Thinned at the notification, not at the source."""
+
+    def setUp(self):
+        import telegram_bot
+        self.bot = telegram_bot
+        self.bot._last_pushed_at.clear()
+        self.addCleanup(self.bot._last_pushed_at.clear)
+
+    def test_the_kinds_that_matter_are_never_delayed(self):
+        for kind in ("ENTRY", "EXIT", "ERROR", "BANKRUPT", "STUCK", "MISSED", "DEPOSIT"):
+            for i in range(5):
+                self.assertTrue(self.bot.due_for_push(kind, 1000.0 + i),
+                                f"{kind} must go out every time")
+
+    def test_a_noisy_kind_is_thinned_to_one_per_interval(self):
+        interval = self.bot.PUSH_INTERVALS["WALLET"]
+        self.assertTrue(self.bot.due_for_push("WALLET", 1000.0))
+        self.assertFalse(self.bot.due_for_push("WALLET", 1000.0 + interval - 1))
+        self.assertTrue(self.bot.due_for_push("WALLET", 1000.0 + interval))
+
+    def test_a_zero_interval_pushes_everything(self):
+        saved = self.bot.PUSH_INTERVALS.copy()
+        self.bot.PUSH_INTERVALS["WALLET"] = 0
+        self.addCleanup(lambda: self.bot.PUSH_INTERVALS.update(saved))
+        for i in range(5):
+            self.assertTrue(self.bot.due_for_push("WALLET", 1000.0 + i))
+
+    def test_throttling_does_not_stall_the_cursor(self):
+        # A suppressed event must still be marked as processed, or the bot re-reads it
+        # forever and never reaches the ENTRY behind it.
+        c = fresh_db()
+        for i in range(4):
+            c.execute("INSERT INTO engine_events(event_ts,kind,message) VALUES(?,?,?)",
+                      (NOW + i, "WALLET", f"+1 wallet {i}"))
+        c.execute("INSERT INTO engine_events(event_ts,kind,message) VALUES(?,?,?)",
+                  (NOW + 9, "ENTRY", "the one that matters"))
+        c.commit()
+
+        sent = []
+        saved_api, saved_cursor = self.bot.api, self.bot.save_cursor
+        self.bot.api = lambda m, d=None: sent.append(d["text"]) or {}
+        self.bot.save_cursor = lambda v: None
+        self.bot._last_event = 0
+        try:
+            self.bot.push_events(c)
+        finally:
+            self.bot.api, self.bot.save_cursor = saved_api, saved_cursor
+
+        self.assertEqual(self.bot._last_event, 5, "the cursor must clear every row it read")
+        self.assertEqual(sum("ENTRY" in t for t in sent), 1, "the entry must still arrive")
+        self.assertEqual(sum("WALLET" in t for t in sent), 1, "four wallet events, one message")
+
+
 class BotCommandListTests(unittest.TestCase):
     """The command list drove four hand-maintained copies: Telegram's menu, the reply
     keyboard, the /help text and CLAUDE.md. Now it drives three and pins the fourth."""
