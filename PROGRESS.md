@@ -1461,3 +1461,62 @@ Live check of the restart path fixed in Pass 21, by killing the webapp child:
 **Уверенность: средне-высокая.** Pass 22 не чист — 4 находки. Одна из них в коде,
 который я написал в Pass 21, что подтверждает правило после Pass 20 в третий раз.
 Счётчик чистых проходов остаётся **0**. Продолжаю Pass 23.
+
+## Pass 23 — guards that cannot fire, and documents nobody diffed
+
+Lens: things that *look* checked. A test that passes for the wrong reason and a README
+that agrees with nothing both read as verification while providing none. Started, per
+the standing rule, with the previous pass's own additions.
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 88 | Medium | The Pass 22 invariant test searched each source for the string `use_utf8_stdio()`. `config.py` contains it — **on its own definition line** — so the module that defines the helper was the one module never required to call it, and `config.main()` did not | Match a call, not a mention; assert ≥8 files examined | `c1db338` |
+| 89 | Medium | The bot's command list lived in **four** hand-maintained copies: `setMyCommands`, the reply keyboard, the `/help` text, and CLAUDE.md. A new command could reach the dispatcher and appear in none | One `COMMANDS` list drives three; five tests pin the rest | `9cb727f`, `bbe344c` |
+| 90 | High | **README documented the strategy the operator replaced** — on all three numbers that decide what gets traded | Corrected; four tests pin it to the code | `bbe344c` |
+| 91 | Low | `SESSION_REPORT.md` describes the superseded Rust pipeline with nothing saying so | Labelled historical; recorded under `ISSUES.md` #7 | `bbe344c` |
+
+### 90 is the one that mattered
+
+```
+                 README (front page)              actual
+weight ladder    3 tiers, 0.25 top at 70%+        5 tiers, 1.0 at 90%+
+entry threshold  "default 0.25, i.e. one 70%+"    1.0
+max hold         "defaults to 6h"                 1h
+```
+
+Every one of those is a value the operator changed by hand on 2026-07-26, and every one
+was still documented at its old value. Worse than merely stale: README described *a
+single 70% wallet opening a position* — precisely the misconfiguration that was
+diagnosed and fixed — as current behaviour. `CLAUDE.md` was correct throughout, so the
+two documents contradicted each other and nothing compared them.
+
+Four tests now parse README and compare against `WEIGHT_TIERS`, `ENTRY`, `MAX_HOLD` and
+`webapp.ROUTES`. The ladder test asserts on the parsed list, so an empty match fails
+rather than passes — the mistake 88 was.
+
+### 88 is the same mistake one level up
+
+I wrote that test last pass to enforce an invariant, and it exempted exactly one file:
+the one that defines the invariant. Verified the tightened version fails before the fix
+rather than assuming it would:
+
+```
+AssertionError: Lists differ: ['config.py'] != []
+```
+
+An AST sweep for the general shape — every assertion in a test nested inside a loop or
+conditional — flagged 21 tests. All but this one iterate literal lists written in the
+test itself and cannot be empty, so they were left alone. Recorded because checking them
+is what makes leaving them a decision rather than an oversight.
+
+```
+$ python -m unittest discover -s gmgn -p 'test_*.py'
+Ran 236 tests in 12.348s
+OK
+```
+
+Bot restarted onto the consolidated command list; `setMyCommands` re-registered and the
+Mini App button reinstalled, per the supervisor log at 22:55:24.
+
+**Уверенность: средне-высокая.** Pass 23 не чист — 4 находки, одна из них снова в коде
+предыдущего прохода. Счётчик чистых проходов **0**. Продолжаю Pass 24.

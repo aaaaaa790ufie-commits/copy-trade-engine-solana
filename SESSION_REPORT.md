@@ -1,5 +1,12 @@
 # Sentinel — Session Report (final)
 
+> **Historical.** This documents the **Rust pipeline** (`config.toml`, Helius WS,
+> `DRY_RUN`/`LIVE`), which the GMGN weighted paper engine in `gmgn/` superseded.
+> Nothing here describes current behaviour: the engine reads its configuration from
+> `.env`, not `config.toml`, and holds no funding wallet. For what runs today see
+> `README.md` and `CLAUDE.md`; for whether this tree should still exist at all, see
+> `ISSUES.md` #7.
+>
 > **Auto-generated.** Updated 2026-07-21 23:50 UTC.
 
 ## Run Parameters

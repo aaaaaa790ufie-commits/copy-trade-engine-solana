@@ -177,6 +177,7 @@ What was established rather than assumed:
 | `dashboard/app.py` | Needs `streamlit`, which is **not installed**; the project is otherwise stdlib-only. Reads `candidate_wallets`, `discovered_tokens`, `wallet_trades`. Its "System Status" panel is a hardcoded string, not real state |
 | `discovery/`, `scorer/` | Populate the legacy tables. `wallet_trades` and `wallet_scores_v2` are **empty**; `candidate_wallets` 13 rows, `discovered_tokens` 21, `wallet_scores` 17 — all stale |
 | Rust workspace | Not built or invoked anywhere in this project's workflow |
+| `SESSION_REPORT.md`, `config.toml` | Describe that pipeline's run parameters. `config.toml` is read by nothing in `gmgn/`; the report is now labelled historical rather than left to read as current |
 
 The one live coupling: `run_engine.import_old_wallets` reads `wallet_scores` and
 `candidate_wallets` into `wallet_watch` on every start. It logged `imported 0 wallets`
