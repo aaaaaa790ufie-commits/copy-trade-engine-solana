@@ -1266,3 +1266,37 @@ OK
 ```
 
 Live discovery unaffected: 160 wallets found, none malformed. All four endpoints parse.
+
+## Pass 20 — 2026-07-26
+
+Lens: the pattern of Passes 15–19 themselves. Almost every finding in this cycle has
+been in code written during the cycle, so this pass audits only that code, to the
+standard applied to anything inherited.
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 76 | Medium | `signal_summary` claimed a window but counted the whole table, relying on pruning. Only the engine prunes, and only while cycling — so with the engine **stopped**, which is when the operator looks, a day-old signal was reported as current, "threshold reached" included | Window applied in the query | `c31dbbc` |
+| 77 | Medium | `feed_is_fresh` could not detect a feed that had **never** worked: it compared the age of the last success, and with none recorded there is no timestamp to be old, so it returned True unconditionally. An engine cycling for hours against a dead feed reported LIVE — the exact case the feature was added for | Consecutive failures counted instead | `c31dbbc` |
+
+The first attempt at fixing 77 was wrong: it used `last_cycle_ts` as the reference,
+which advances every cycle, so the difference stayed small and nothing changed. Caught
+by running it rather than reasoning about it — recorded because that is the lesson, not
+an incidental detail.
+
+```
+$ python -m unittest discover -s gmgn -p 'test_*.py'
+Ran 207 tests in 11.176s
+OK
+```
+
+Live after relaunch: `feed failures 0`, `feed fresh True`, `🟢 LIVE`, and the reach
+metric reporting `best 0.0625 of 1.0 over 58 cycles` — accumulating honestly, and
+showing the threshold is a long way off.
+
+### Standing observation for later passes
+
+Passes 15–20 produced 17 findings, the large majority in code written during this same
+cycle. That is not coincidence: new code has survived zero review passes while the
+inherited code has survived nineteen. The working rule that follows — keep your own
+edits under the same scrutiny as inherited code, and never treat "I just wrote this" as
+"this is checked."
