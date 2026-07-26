@@ -106,19 +106,20 @@ def refresh_wallet_stats(c,chain,now):
  addrs=[r[0] for r in stale]; st=get_stats(chain,addrs,max_batches=STATS_BATCH_MAX); upd=0; new_high=[]
  for w,data in st.items():
   wrv=wr(data); bc=int(n(data,"buy","buy_count","trades_7d")); sc=int(n(data,"sell","sell_count")); total_buys=max(bc,sc)
-  # newbie filter: 100% winrate with only 1 trade total — mark as low to be cleaned
-  if wrv>=1.0 and bc+sc<=1:
-   c.execute("UPDATE wallet_watch SET winrate=?,updated_at=? WHERE address=? AND chain=?",(0.49,now,w,chain)); upd+=1; continue
+  # Ineligible is not the same as bad. A wallet with too small a sample, or one that
+  # has stopped buying, is parked with active=0 — it keeps its real winrate, carries no
+  # weight, and is re-checked later. Overwriting the winrate with a synthetic 0.49 used
+  # to hand these to cleanup_wallets, which banned them permanently.
+  if (wrv>=1.0 and bc+sc<=1) or (wrv>0 and bc==0):
+   c.execute("UPDATE wallet_watch SET winrate=?,active=0,updated_at=? WHERE address=? AND chain=?",(wrv,now,w,chain)); upd+=1; continue
   if wrv>0 and total_buys>0:
    old=c.execute("SELECT winrate FROM wallet_watch WHERE address=? AND chain=?",(w,chain)).fetchone()
    ls=int(n(data,"last_timestamp"))
-   if ls>0: c.execute("UPDATE wallet_watch SET winrate=?,last_seen=?,updated_at=? WHERE address=? AND chain=?",(wrv,ls,now,w,chain))
-   else: c.execute("UPDATE wallet_watch SET winrate=?,updated_at=? WHERE address=? AND chain=?",(wrv,now,w,chain))
+   # active=1 also restores a parked wallet that has resumed trading.
+   if ls>0: c.execute("UPDATE wallet_watch SET winrate=?,last_seen=?,active=1,updated_at=? WHERE address=? AND chain=?",(wrv,ls,now,w,chain))
+   else: c.execute("UPDATE wallet_watch SET winrate=?,active=1,updated_at=? WHERE address=? AND chain=?",(wrv,now,w,chain))
    upd+=1
    if wrv>=.70 and old and old[0]<.70: new_high.append((w[:8],wrv))
-  elif wrv>0 and bc==0:
-   # inactive — demote to 0.49 so cleanup catches it
-   c.execute("UPDATE wallet_watch SET winrate=?,updated_at=? WHERE address=? AND chain=?",(min(wrv,0.49),now,w,chain))
  if upd:
   LOG.info("refreshed stats for %d/%d stale wallets on %s",upd,len(addrs),chain)
   if new_high: emit(c,"WALLET",f"{chain} | NEW high-winrate: {len(new_high)} wallet(s) >=70%, ex: {new_high[0][0]}... {new_high[0][1]*100:.0f}%")
@@ -153,11 +154,14 @@ def discover_wallets(c,chain,now):
 def cleanup_wallets(c,chain,now):
  """Blacklist only wallets with a CONFIRMED sub-50% winrate. Zero-winrate rows (stats never
  fetched yet) are dropped after ZERO_TTL without blacklisting, so a transient API failure or
- rate limit can never blacklist a good wallet forever. Manual seeds are never auto-dropped."""
- low=c.execute("SELECT address FROM wallet_watch WHERE chain=? AND winrate>0 AND winrate<0.50",(chain,)).fetchall()
+ rate limit can never blacklist a good wallet forever. Manual seeds are never auto-dropped.
+
+ Parked wallets (active=0: too small a sample, or no recent buys) are deliberately excluded.
+ They are not bad traders, and a blacklisted address is never re-added by discovery."""
+ low=c.execute("SELECT address FROM wallet_watch WHERE chain=? AND active=1 AND winrate>0 AND winrate<0.50",(chain,)).fetchall()
  if low:
   c.executemany("INSERT OR IGNORE INTO wallet_blacklist(address,chain,blacklisted_at,reason) VALUES(?,?,?,'low_winrate')",[(r[0],chain,now) for r in low])
-  c.execute("DELETE FROM wallet_watch WHERE chain=? AND winrate>0 AND winrate<0.50",(chain,))
+  c.executemany("DELETE FROM wallet_watch WHERE chain=? AND address=?",[(chain,r[0]) for r in low])
  c.execute("DELETE FROM wallet_watch WHERE chain=? AND winrate=0 AND source!='manual_seed' AND ?-updated_at>=?",(chain,now,ZERO_TTL))
 def cooling(c,m,chain,now):
  r=c.execute("SELECT until_ts FROM paper_cooldowns WHERE token_mint=? AND chain=?",(m,chain)).fetchone(); return bool(r and r[0]>now)

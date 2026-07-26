@@ -119,6 +119,79 @@ class PaperEngineTests(unittest.TestCase):
         self.assertIn("manual_zero", watch)              # manual seeds are never auto-dropped
 
 
+class WalletEligibilityTests(unittest.TestCase):
+    """"Not eligible yet" and "confirmed bad trader" must not share a mechanism.
+
+    refresh_wallet_stats used to overwrite the win rate with a synthetic 0.49 for
+    wallets with too small a sample or no recent buys, purely so cleanup_wallets
+    would sweep them up. cleanup_wallets then blacklisted them permanently — and a
+    blacklisted address is never re-added by discovery. A dormant wallet with an 80%
+    win rate was therefore banned forever, contradicting cleanup_wallets' own
+    docstring ("only ... a CONFIRMED sub-50% winrate").
+    """
+
+    def setUp(self):
+        self._get_stats = pe.get_stats
+
+    def tearDown(self):
+        pe.get_stats = self._get_stats
+
+    def _refresh(self, c, stats, at=NOW):
+        pe.get_stats = lambda chain, wallets, max_batches=0: stats
+        pe.refresh_wallet_stats(c, "sol", at)
+
+    def _seed(self, c, address, winrate):
+        c.execute("INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) "
+                  "VALUES(?,?,?,?,?,?)", (address, "sol", "gmgn", 0, winrate, 0))
+
+    def test_dormant_high_winrate_wallet_is_parked_not_banned(self):
+        c = fresh_db()
+        self._seed(c, "dormant", 0.80)
+        self._refresh(c, {"dormant": {"winrate": 0.80, "buy": 0, "sell": 3}})
+        cleanup_wallets(c, "sol", NOW)
+
+        row = c.execute("SELECT winrate,active FROM wallet_watch WHERE address='dormant'").fetchone()
+        self.assertIsNotNone(row, "a dormant wallet must stay on the watch list")
+        self.assertAlmostEqual(row[0], 0.80, msg="its real win rate must not be overwritten")
+        self.assertEqual(row[1], 0, "but it must be inactive, so it carries no weight")
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM wallet_blacklist").fetchone()[0], 0)
+        self.assertNotIn("dormant", pe.cached_weights(c, "sol"))
+
+    def test_small_sample_wallet_is_parked_not_banned(self):
+        c = fresh_db()
+        self._seed(c, "newbie", 0.0)
+        self._refresh(c, {"newbie": {"winrate": 1.0, "buy": 1, "sell": 0}})
+        cleanup_wallets(c, "sol", NOW)
+
+        row = c.execute("SELECT active FROM wallet_watch WHERE address='newbie'").fetchone()
+        self.assertIsNotNone(row, "one perfect trade is not evidence of anything, but not a crime")
+        self.assertEqual(row[0], 0)
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM wallet_blacklist").fetchone()[0], 0)
+
+    def test_confirmed_low_winrate_is_still_banned(self):
+        c = fresh_db()
+        self._seed(c, "loser", 0.0)
+        self._refresh(c, {"loser": {"winrate": 0.31, "buy": 20, "sell": 18}})
+        cleanup_wallets(c, "sol", NOW)
+
+        self.assertIsNone(c.execute("SELECT 1 FROM wallet_watch WHERE address='loser'").fetchone())
+        self.assertTrue(pe.is_blacklisted(c, "loser", "sol"))
+
+    def test_wallet_that_resumes_trading_is_reactivated(self):
+        c = fresh_db()
+        self._seed(c, "returner", 0.72)
+        self._refresh(c, {"returner": {"winrate": 0.72, "buy": 0, "sell": 5}})
+        self.assertEqual(
+            c.execute("SELECT active FROM wallet_watch WHERE address='returner'").fetchone()[0], 0)
+
+        # A parked wallet is only re-queried once its stats go stale, so advance past the TTL.
+        later = NOW + pe.STATS_REFRESH_SEC + 1
+        self._refresh(c, {"returner": {"winrate": 0.72, "buy": 9, "sell": 7}}, at=later)
+        row = c.execute("SELECT active,winrate FROM wallet_watch WHERE address='returner'").fetchone()
+        self.assertEqual(row[0], 1, "trading again must restore eligibility")
+        self.assertIn("returner", pe.cached_weights(c, "sol"))
+
+
 class ReEntryTests(unittest.TestCase):
     """paper_positions.token_mint is a PRIMARY KEY, so a token traded once leaves a
     closed row behind. Re-entering it after the cooldown used to raise IntegrityError,
