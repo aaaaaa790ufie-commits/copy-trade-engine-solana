@@ -119,6 +119,50 @@ class PaperEngineTests(unittest.TestCase):
         self.assertIn("manual_zero", watch)              # manual seeds are never auto-dropped
 
 
+class ReEntryTests(unittest.TestCase):
+    """paper_positions.token_mint is a PRIMARY KEY, so a token traded once leaves a
+    closed row behind. Re-entering it after the cooldown used to raise IntegrityError,
+    which escaped cycle() and killed the process — and since the signal was still
+    inside the 30-minute cluster window, the supervisor restarted straight into the
+    same crash, leaving open positions unchecked against their stops.
+    """
+
+    def setUp(self):
+        self._token_price = pe.token_price
+        pe.token_price = lambda chain, mint: 1.0
+
+    def tearDown(self):
+        pe.token_price = self._token_price
+
+    def _signal(self, ts):
+        return [{"maker": "w1", "base_address": "MINTX", "timestamp": ts, "side": "buy",
+                 "price_usd": 1.0, "launchpad": "pump"}]
+
+    def test_reentry_after_cooldown_reopens_the_position(self):
+        c = fresh_db()
+        pe.enter(c, "sol", self._signal(NOW), {"w1": 1.0}, NOW)
+        c.execute("UPDATE paper_positions SET status='closed'")
+        c.execute("DELETE FROM paper_cooldowns")
+
+        pe.enter(c, "sol", self._signal(NOW + 1), {"w1": 1.0}, NOW + 1)
+
+        rows = c.execute("SELECT status,opened_at FROM paper_positions WHERE token_mint='MINTX'").fetchall()
+        self.assertEqual(len(rows), 1, "the row is reused, not duplicated")
+        self.assertEqual(rows[0][0], "open")
+        self.assertEqual(rows[0][1], NOW + 1, "opened_at reflects the new entry, not the old one")
+        # Both entries must remain in the trade journal.
+        self.assertEqual(
+            c.execute("SELECT COUNT(*) FROM paper_trades WHERE action='ENTRY'").fetchone()[0], 2)
+
+    def test_open_position_is_never_re_entered(self):
+        c = fresh_db()
+        pe.enter(c, "sol", self._signal(NOW), {"w1": 1.0}, NOW)
+        before = c.execute("SELECT budget_sol FROM paper_account WHERE id=1").fetchone()[0]
+        pe.enter(c, "sol", self._signal(NOW + 1), {"w1": 1.0}, NOW + 1)
+        after = c.execute("SELECT budget_sol FROM paper_account WHERE id=1").fetchone()[0]
+        self.assertEqual(before, after, "an already-open position must not be staked twice")
+
+
 class CycleOrderingTests(unittest.TestCase):
     """The cycle must enforce stops before it does any wallet bookkeeping.
 
@@ -211,6 +255,61 @@ class CycleOrderingTests(unittest.TestCase):
         pe.cycle(c)
         pe.cycle(c)
         self.assertEqual(len(runs), 1, "maintenance must run at most once per MAINT_INTERVAL")
+
+
+class ResilienceTests(unittest.TestCase):
+    """A transient cycle failure must not take the stop-loss loop down with it."""
+
+    def setUp(self):
+        self._saved = {k: getattr(pe, k) for k in ("cycle", "POLL", "MAX_CYCLE_FAILURES")}
+        pe.POLL = 0
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(pe, k, v)
+
+    def test_transient_failure_is_journalled_and_retried(self):
+        c = fresh_db()
+        calls = []
+
+        def flaky(conn):
+            calls.append(1)
+            if len(calls) == 1:
+                conn.execute("UPDATE paper_account SET budget_sol=0.0")  # partial write
+                raise RuntimeError("boom")
+
+        pe.cycle = flaky
+        pe.MAX_CYCLE_FAILURES = 5
+        # once=True still runs the retry path for the failing cycle, so drive two passes
+        pe.run_forever(c, once=True)
+        pe.run_forever(c, once=True)
+
+        self.assertEqual(len(calls), 2, "the loop kept going after the failure")
+        kinds = [r[0] for r in c.execute("SELECT kind FROM engine_events")]
+        self.assertIn("ERROR", kinds, "the failure must be journalled, not swallowed")
+        budget = c.execute("SELECT budget_sol FROM paper_account WHERE id=1").fetchone()[0]
+        self.assertEqual(budget, 0.1, "the partial write must be rolled back")
+
+    def test_persistent_failure_escalates(self):
+        c = fresh_db()
+        pe.MAX_CYCLE_FAILURES = 3
+
+        def always_broken(conn):
+            raise RuntimeError("still broken")
+
+        pe.cycle = always_broken
+        with self.assertRaises(RuntimeError):
+            pe.run_forever(c)  # must give up so the supervisor restarts cleanly
+
+    def test_keyboard_interrupt_is_not_caught(self):
+        c = fresh_db()
+
+        def interrupted(conn):
+            raise KeyboardInterrupt
+
+        pe.cycle = interrupted
+        with self.assertRaises(KeyboardInterrupt):
+            pe.run_forever(c)
 
 
 class InitDataTests(unittest.TestCase):

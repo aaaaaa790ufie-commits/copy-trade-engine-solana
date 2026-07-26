@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse, logging, os, sqlite3, time
 from pathlib import Path
 import config
-from paper_engine import DB, POLL, cycle, init, emit, is_blacklisted, LOG
+from paper_engine import DB, POLL, cycle, init, emit, is_blacklisted, run_forever, LOG
 
 SEEDS_PATH = Path(os.getenv("SEED_WALLETS_SOL", str(Path(__file__).resolve().parent.parent / "data" / "seed_wallets_sol.txt")))
 
@@ -68,11 +68,7 @@ def main():
     imported = import_old_wallets(c)
     LOG.info("wallet_watch now has %d wallets", c.execute("SELECT COUNT(*) FROM wallet_watch").fetchone()[0])
     try:
-        while True:
-            cycle(c)
-            if args.once:
-                break
-            time.sleep(POLL)
+        run_forever(c, once=args.once)
     finally:
         c.close()
 

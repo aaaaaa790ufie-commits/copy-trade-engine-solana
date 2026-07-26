@@ -176,7 +176,11 @@ def enter(c,chain,trades,weights,now):
    fully_invested=bool(c.execute("SELECT 1 FROM paper_positions WHERE status='open' LIMIT 1").fetchone())
    if not a[1] and not fully_invested: c.execute("UPDATE paper_account SET bankrupt=1,updated_at=? WHERE id=1",(now,)); emit(c,"BANKRUPT","обнулились в papertrading, скажи это своему hermes agent, будем разбираться по сделкам")
    continue
-  c.execute("UPDATE paper_account SET budget_sol=budget_sol-?,updated_at=? WHERE id=1",(STAKE,now)); c.execute("INSERT INTO paper_positions(token_mint,chain,entry_price,peak_price,stake_sol,opened_at,signal_score,wallet_count,status) VALUES(?,?,?,?,?,?,?,?,?)",(m,chain,p,p,STAKE,now,score,len(buys),"open")); c.execute("INSERT INTO paper_trades(token_mint,chain,action,price,stake_sol,reason,wallet_count,signal_score,event_ts) VALUES(?,?,?,?,?,?,?,?,?)",(m,chain,"ENTRY",p,STAKE,"weighted cluster",len(buys),score,now)); emit(c,"ENTRY",f"{chain} {m} | wallets={len(buys)} score={score:.4f} | {STAKE:.4f} SOL")
+  c.execute("UPDATE paper_account SET budget_sol=budget_sol-?,updated_at=? WHERE id=1",(STAKE,now))
+  # token_mint is the primary key, so a token traded before still has its closed row.
+  # Reopening reuses it — the trade journal in paper_trades keeps the full history.
+  c.execute("INSERT INTO paper_positions(token_mint,chain,entry_price,peak_price,stake_sol,opened_at,signal_score,wallet_count,status) VALUES(?,?,?,?,?,?,?,?,'open') ON CONFLICT(token_mint) DO UPDATE SET chain=excluded.chain,entry_price=excluded.entry_price,peak_price=excluded.peak_price,stake_sol=excluded.stake_sol,opened_at=excluded.opened_at,signal_score=excluded.signal_score,wallet_count=excluded.wallet_count,status='open'",(m,chain,p,p,STAKE,now,score,len(buys)))
+  c.execute("INSERT INTO paper_trades(token_mint,chain,action,price,stake_sol,reason,wallet_count,signal_score,event_ts) VALUES(?,?,?,?,?,?,?,?,?)",(m,chain,"ENTRY",p,STAKE,"weighted cluster",len(buys),score,now)); emit(c,"ENTRY",f"{chain} {m} | wallets={len(buys)} score={score:.4f} | {STAKE:.4f} SOL")
 def exits(c,chain,trades,now):
  latest={}
  for t in trades:
@@ -265,13 +269,38 @@ def cycle(c):
    refresh_wallet_stats(c,chain,now); discover_wallets(c,chain,now); cleanup_wallets(c,chain,now)
  heartbeat(c,now); c.commit()
  LOG.info("[cycle] %.1fs wallets=%d open=%d",time.time()-now,c.execute("SELECT COUNT(*) FROM wallet_watch").fetchone()[0],c.execute("SELECT COUNT(*) FROM paper_positions WHERE status='open'").fetchone()[0])
+MAX_CYCLE_FAILURES=config.get_int("GMGN_MAX_CYCLE_FAILURES",5)
+def run_forever(c,once=False):
+ """Poll loop that survives a transient cycle failure.
+
+ A single bad API response used to raise out of cycle() and kill the process. The
+ supervisor would restart it, but every second spent restarting is a second in which
+ open positions are not checked against their stops — the exact failure that produced
+ the -99.99% exits. So a failed cycle is rolled back, journalled and retried, and only
+ a persistent failure (MAX_CYCLE_FAILURES in a row) is escalated to the supervisor for
+ a clean restart. Failures are never swallowed silently: each one is logged with its
+ traceback and pushed to Telegram as an ERROR event."""
+ failures=0
+ while True:
+  try:
+   cycle(c); failures=0
+  except KeyboardInterrupt: raise
+  except Exception as e:
+   failures+=1
+   try: c.rollback()   # discard the half-applied transaction, e.g. a debited stake
+   except Exception: LOG.exception("rollback failed")
+   LOG.exception("cycle failed (%d/%d consecutive)",failures,MAX_CYCLE_FAILURES)
+   try:
+    emit(c,"ERROR",f"цикл упал ({failures}/{MAX_CYCLE_FAILURES}): {type(e).__name__}: {e}"); c.commit()
+   except Exception: LOG.exception("could not journal the cycle failure")
+   if failures>=MAX_CYCLE_FAILURES:
+    LOG.error("%d consecutive failures — exiting for a clean restart",failures)
+    raise
+  if once: break
+  time.sleep(POLL)
 def main():
  import argparse
  ap=argparse.ArgumentParser(); ap.add_argument("--once",action="store_true"); ap.add_argument("--db-path",default=DB); a=ap.parse_args(); config.use_utf8_stdio(); logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s"); c=sqlite3.connect(a.db_path,timeout=30); init(c)
- try:
-  while True:
-   cycle(c)
-   if a.once: break
-   time.sleep(POLL)
+ try: run_forever(c,once=a.once)
  finally: c.close()
 if __name__=="__main__": main()
