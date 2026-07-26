@@ -28,7 +28,7 @@ CHAT = config.TELEGRAM_CHAT_ID
 # by Telegram, so the button is offered only when a public origin is configured.
 WEBAPP_URL = config.WEBAPP_PUBLIC_URL if config.WEBAPP_PUBLIC_URL.startswith("https://") else ""
 
-PUSH_KINDS = ("ENTRY", "EXIT", "WALLET", "WALLET_BUY", "BANKRUPT", "RECOVERY", "ERROR")
+PUSH_KINDS = ("ENTRY", "EXIT", "WALLET", "WALLET_BUY", "BANKRUPT", "RECOVERY", "ERROR", "STUCK")
 
 
 def api(method: str, data: dict | None = None) -> dict:
@@ -96,7 +96,7 @@ def push_events(c: sqlite3.Connection) -> None:
         if kind not in PUSH_KINDS:
             continue
         icon = {"ENTRY": "🟢", "EXIT": "🔴", "WALLET": "👛", "WALLET_BUY": "⭐",
-                "BANKRUPT": "💀", "RECOVERY": "♻️", "ERROR": "⚠️"}.get(kind, "•")
+                "BANKRUPT": "💀", "RECOVERY": "♻️", "ERROR": "⚠️", "STUCK": "🧊"}.get(kind, "•")
         try:
             api("sendMessage", {"chat_id": CHAT, "text": f"{icon} {kind}: {msg}"})
             time.sleep(0.35)

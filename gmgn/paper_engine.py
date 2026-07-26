@@ -42,6 +42,18 @@ def wr(s): return n(s,"winrate","win_rate","pnl_stat.winrate")
 def weight(x): return .25 if x>=.70 else .0625 if x>=.60 else .03125 if x>=.50 else 0.0
 def px(t): return n(t,"price_now","price_usd","price")
 _price_cache={}
+PRICE_CACHE_MAX=config.get_int("GMGN_PRICE_CACHE_MAX",5000)
+def _cache_price(key,now,p):
+ """Store a mark, keeping the cache bounded.
+
+ The engine prices every token it sees, so an unbounded dict grows for as long as the
+ process lives. Expired entries are dropped first; if that frees nothing, the oldest
+ half goes."""
+ if len(_price_cache)>=PRICE_CACHE_MAX:
+  for k in [k for k,(ts,_) in _price_cache.items() if now-ts>=PRICE_TTL]: del _price_cache[k]
+  if len(_price_cache)>=PRICE_CACHE_MAX:
+   for k in sorted(_price_cache,key=lambda k:_price_cache[k][0])[:len(_price_cache)//2]: del _price_cache[k]
+ _price_cache[key]=(now,p)
 def token_price(chain,mint):
  """Independent mark price from `token info` (cached PRICE_TTL sec); 0.0 when unavailable."""
  now=time.time(); hit=_price_cache.get((chain,mint))
@@ -49,16 +61,17 @@ def token_price(chain,mint):
  p=0.0
  try:
   row=(list_rows(cli(["token","info","--chain",chain,"--address",mint])) or [{}])[0]
-  raw_price = row.get("price")
-  if isinstance(raw_price, dict):
-   raw_price = raw_price.get("price") or raw_price.get("price_usd")
+  raw_price=row.get("price")
+  # GMGN returns price either as a scalar or as {"address":..., "price":"0.0000013"}.
+  if isinstance(raw_price,dict): raw_price=raw_price.get("price") or raw_price.get("price_usd")
   if raw_price is not None:
-   try: p = float(raw_price)
-   except: pass
-  if p <= 0:
-   p = n(row, "price_usd", "usd_price", "price_now")
+   try: p=float(raw_price)
+   except (TypeError,ValueError): LOG.debug("unparsable price for %s: %r",mint[:8],raw_price)
+  if p<=0: p=n(row,"price_usd","usd_price","price_now")
  except Exception as e: LOG.warning("price %s %s: %s",chain,mint[:8],e)
- _price_cache[(chain,mint)]=(now,p); return p
+ if p<0:
+  LOG.warning("negative price %r for %s — treating as unavailable",p,mint[:8]); p=0.0
+ _cache_price((chain,mint),now,p); return p
 def allowed(t,chain):
  if chain=="robinhood": return True
  raw=" ".join(str(t.get(k,"")) for k in ("launchpad","launchpad_platform","migrated_pool_exchange")); b=t.get("base_token") if isinstance(t.get("base_token"),dict) else {}; return "pump" in (raw+" "+str(b.get("launchpad",""))).lower()
@@ -165,14 +178,38 @@ def cleanup_wallets(c,chain,now):
  c.execute("DELETE FROM wallet_watch WHERE chain=? AND winrate=0 AND source!='manual_seed' AND ?-updated_at>=?",(chain,now,ZERO_TTL))
 def cooling(c,m,chain,now):
  r=c.execute("SELECT until_ts FROM paper_cooldowns WHERE token_mint=? AND chain=?",(m,chain)).fetchone(); return bool(r and r[0]>now)
-def enter(c,chain,trades,weights,now):
+# A position whose token stops being priceable never closes, so its stake stays locked
+# out of the account. Alert once it is clearly stuck, then only occasionally — the poll
+# loop runs every POLL seconds and would otherwise flood Telegram.
+STUCK_AFTER=config.get_int("GMGN_STUCK_AFTER_SECONDS",MAX_HOLD*2)
+STUCK_REMIND=config.get_int("GMGN_STUCK_REMIND_SECONDS",21600)
+def throttled(c,key,now,interval):
+ """True at most once per `interval` for this key. Used to rate-limit repeat alerts."""
+ row=c.execute("SELECT updated_at FROM engine_state WHERE key=?",(key,)).fetchone()
+ if row and now-row[0]<interval: return False
+ c.execute("INSERT INTO engine_state(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(key,str(now),now))
+ return True
+def cluster(chain,trades,weights,now):
+ """Latest action per wallet, per mint, inside the cluster window.
+
+ Only weighted wallets count, and only their most recent action: a wallet that bought
+ and then sold is a seller, not a buyer. enter() and save_token_scores() must build
+ exactly the same view — otherwise the score /weights reports in Telegram would not be
+ the score that actually triggers an entry."""
  latest=defaultdict(dict)
  for t in trades:
   if allowed(t,chain) and mint(t) and stamp(t)>=now-WINDOW and wallet(t) in weights and quote(t) in ("buy","sell"):
    if wallet(t) not in latest[mint(t)] or stamp(t)>stamp(latest[mint(t)][wallet(t)]): latest[mint(t)][wallet(t)]=t
+ return latest
+def score_of(ws,weights):
+ """Buying wallets for one mint and their summed weight."""
+ buys={w:t for w,t in ws.items() if quote(t)=="buy"}
+ return buys,sum(weights[w] for w in buys)
+def enter(c,chain,trades,weights,now):
+ latest=cluster(chain,trades,weights,now)
  open_mints={r[0] for r in c.execute("SELECT token_mint FROM paper_positions WHERE status='open'")}
  for m,ws in latest.items():
-  buys={w:t for w,t in ws.items() if quote(t)=="buy"}; score=sum(weights[w] for w in buys)
+  buys,score=score_of(ws,weights)
   if score<ENTRY or m in open_mints or cooling(c,m,chain,now): continue
   p=token_price(chain,m) or (px(max(buys.values(),key=stamp)) if buys else 0); a=c.execute("SELECT budget_sol,bankrupt FROM paper_account WHERE id=1").fetchone()
   if p<=0 or not a: continue
@@ -191,11 +228,22 @@ def exits(c,chain,trades,now):
   if allowed(t,chain) and mint(t) and px(t)>0 and (mint(t) not in latest or stamp(t)>stamp(latest[mint(t)])): latest[mint(t)]=t
  positions=c.execute("SELECT token_mint,entry_price,peak_price,stake_sol,signal_score,wallet_count,opened_at FROM paper_positions WHERE chain=? AND status=?",(chain,"open")).fetchall()
  for m,entry,peak,stake,score,count,opened in positions:
+  if entry<=0:
+   # Would raise ZeroDivisionError below and abort the loop, leaving every later
+   # position in this chain unchecked. enter() rejects a zero entry price, so this
+   # can only come from hand-edited or legacy data — skip the row, keep the loop.
+   LOG.error("position %s has a non-positive entry price %r; skipping it",m[:8],entry); continue
   current=token_price(chain,m)
   if current<=0 and m in latest: current=px(latest[m])
   expired=now-opened>=MAX_HOLD
   if current<=0:
-   if expired: LOG.warning("position %s past max hold but no price available; retrying next cycle",m[:8])
+   if expired:
+    LOG.warning("position %s past max hold but no price available; retrying next cycle",m[:8])
+    # A token that stays unpriceable is almost certainly delisted, and its stake is
+    # locked out of the account for as long as it stays open. Valuing it is the
+    # operator's call (see ISSUES.md), so surface it loudly instead of guessing.
+    if now-opened>=STUCK_AFTER and throttled(c,f"stuck_{m}",now,STUCK_REMIND):
+     emit(c,"STUCK",f"{chain} {m} | {(now-opened)//3600}ч без котировки, ставка {stake:.4f} SOL заморожена")
    continue
   peak=max(peak,current); change=current/entry-1; c.execute("UPDATE paper_positions SET peak_price=? WHERE token_mint=?",(peak,m)); hard=change<=-HARD; trailing=(peak/entry-1)>=TRAIL_ACT and current<=peak*(1-TRAIL_DIST)
   if hard or trailing or expired:
@@ -204,14 +252,10 @@ def exits(c,chain,trades,now):
  if a and a[1] and a[0]>=STAKE:
   c.execute("UPDATE paper_account SET bankrupt=0,updated_at=? WHERE id=1",(now,)); emit(c,"RECOVERY",f"баланс {a[0]:.5f} SOL снова покрывает ставку {STAKE:.4f} — paper-трейдинг возобновлён")
 def save_token_scores(c,chain,trades,weights,now):
- """Build latest dict same as enter(), then save scores."""
- latest=defaultdict(dict)
- for t in trades:
-  if allowed(t,chain) and mint(t) and stamp(t)>=now-WINDOW and wallet(t) in weights and quote(t) in ("buy","sell"):
-   if wallet(t) not in latest[mint(t)] or stamp(t)>stamp(latest[mint(t)][wallet(t)]): latest[mint(t)][wallet(t)]=t
+ """Publish the same cluster view enter() acts on, so /weights matches reality."""
  c.execute("DELETE FROM token_scores WHERE chain=?",(chain,))
- for m,ws in latest.items():
-  buys=[w for w,t in ws.items() if quote(t)=="buy"]; score=sum(weights[w] for w in buys)
+ for m,ws in cluster(chain,trades,weights,now).items():
+  buys,score=score_of(ws,weights)
   if score>0:
    c.execute("INSERT INTO token_scores(chain,token_mint,score,buy_wallets,total_wallets,updated_at) VALUES(?,?,?,?,?,?)",(chain,m,score,len(buys),len(ws),now))
 MAINT_INTERVAL=config.get_int("GMGN_MAINTENANCE_SECONDS",600)

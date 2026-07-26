@@ -192,6 +192,137 @@ class WalletEligibilityTests(unittest.TestCase):
         self.assertIn("returner", pe.cached_weights(c, "sol"))
 
 
+class ExitRobustnessTests(unittest.TestCase):
+    """exits() is the stop-loss path: one bad row must not abort the whole sweep."""
+
+    def setUp(self):
+        self._token_price = pe.token_price
+
+    def tearDown(self):
+        pe.token_price = self._token_price
+
+    def test_zero_entry_price_does_not_abort_the_sweep(self):
+        c = fresh_db()
+        c.execute("INSERT INTO paper_positions VALUES('BADROW','sol',0.0,0.0,0.025,?,1.0,4,'open')", (NOW,))
+        c.execute("INSERT INTO paper_positions VALUES('GOODROW','sol',1.0,1.0,0.025,?,1.0,4,'open')", (NOW,))
+        pe.token_price = lambda chain, mint: 0.4  # -60%, past the hard stop
+
+        pe.exits(c, "sol", [], NOW)
+
+        # The good position must still be closed even though a broken row precedes it.
+        status = dict(c.execute("SELECT token_mint,status FROM paper_positions"))
+        self.assertEqual(status["GOODROW"], "closed",
+                         "a division-by-zero row used to abort every later stop check")
+        self.assertEqual(status["BADROW"], "open")
+
+    def test_stuck_position_is_alerted_once_then_throttled(self):
+        c = fresh_db()
+        opened = NOW - pe.STUCK_AFTER - 1
+        c.execute("INSERT INTO paper_positions VALUES('GHOST','sol',1.0,1.0,0.025,?,1.0,4,'open')", (opened,))
+        pe.token_price = lambda chain, mint: 0.0  # unpriceable, e.g. delisted
+
+        pe.exits(c, "sol", [], NOW)
+        pe.exits(c, "sol", [], NOW + 1)  # next poll, seconds later
+
+        stuck = c.execute("SELECT COUNT(*) FROM engine_events WHERE kind='STUCK'").fetchone()[0]
+        self.assertEqual(stuck, 1, "the poll loop must not flood Telegram with repeats")
+        self.assertEqual(
+            c.execute("SELECT status FROM paper_positions WHERE token_mint='GHOST'").fetchone()[0],
+            "open", "valuing a delisted token is the operator's call, not the engine's")
+
+        pe.exits(c, "sol", [], NOW + pe.STUCK_REMIND + 1)
+        self.assertEqual(
+            c.execute("SELECT COUNT(*) FROM engine_events WHERE kind='STUCK'").fetchone()[0], 2,
+            "but it must remind eventually")
+
+
+class PriceCacheTests(unittest.TestCase):
+    """The engine prices every token it sees, so the mark cache must stay bounded."""
+
+    def setUp(self):
+        self._cli, self._max = pe.cli, pe.PRICE_CACHE_MAX
+        pe._price_cache.clear()
+
+    def tearDown(self):
+        pe.cli, pe.PRICE_CACHE_MAX = self._cli, self._max
+        pe._price_cache.clear()
+
+    def test_cache_stays_under_the_cap(self):
+        pe.PRICE_CACHE_MAX = 50
+        pe.cli = lambda args: [{"price": "1.5"}]
+        for i in range(500):
+            pe.token_price("sol", f"mint{i}")
+        self.assertLessEqual(len(pe._price_cache), pe.PRICE_CACHE_MAX,
+                             "an unbounded cache leaks for the lifetime of the process")
+
+    def test_nested_price_dict_is_parsed(self):
+        pe.cli = lambda args: [{"price": {"address": "x", "price": "0.0000013"}}]
+        self.assertAlmostEqual(pe.token_price("sol", "nested"), 0.0000013)
+
+    def test_unparsable_price_is_not_fatal(self):
+        pe.cli = lambda args: [{"price": "not-a-number"}]
+        self.assertEqual(pe.token_price("sol", "junk"), 0.0)
+
+    def test_negative_price_is_treated_as_unavailable(self):
+        # A negative mark would flip change=current/entry-1 and could fake a profit.
+        pe.cli = lambda args: [{"price": "-5"}]
+        self.assertEqual(pe.token_price("sol", "negative"), 0.0)
+
+    def test_api_failure_returns_zero_rather_than_raising(self):
+        def boom(args):
+            raise RuntimeError("gmgn down")
+
+        pe.cli = boom
+        self.assertEqual(pe.token_price("sol", "down"), 0.0)
+
+
+class ClusterTests(unittest.TestCase):
+    """/weights must report the same score that enter() acts on."""
+
+    def setUp(self):
+        self._token_price = pe.token_price
+        pe.token_price = lambda chain, mint: 1.0
+
+    def tearDown(self):
+        pe.token_price = self._token_price
+
+    def _t(self, maker, mint_, side, ts):
+        return {"maker": maker, "base_address": mint_, "side": side, "timestamp": ts,
+                "price_usd": 1.0, "launchpad": "pump"}
+
+    def test_latest_action_per_wallet_wins(self):
+        # w1 bought then sold: it is a seller and must not count toward the score.
+        trades = [self._t("w1", "M", "buy", NOW - 100), self._t("w1", "M", "sell", NOW - 10)]
+        got = pe.cluster("sol", trades, {"w1": 0.25}, NOW)
+        buys, score = pe.score_of(got["M"], {"w1": 0.25})
+        self.assertEqual(buys, {})
+        self.assertEqual(score, 0.0)
+
+    def test_trades_outside_the_window_are_ignored(self):
+        trades = [self._t("w1", "M", "buy", NOW - pe.WINDOW - 1)]
+        self.assertEqual(pe.cluster("sol", trades, {"w1": 0.25}, NOW), {})
+
+    def test_unweighted_wallets_are_ignored(self):
+        trades = [self._t("stranger", "M", "buy", NOW)]
+        self.assertEqual(pe.cluster("sol", trades, {"w1": 0.25}, NOW), {})
+
+    def test_published_score_matches_the_entry_decision(self):
+        c = fresh_db()
+        weights = {"a": 0.25, "b": 0.0625, "c": 0.03125}
+        trades = [self._t("a", "M1", "buy", NOW), self._t("b", "M1", "buy", NOW),
+                  self._t("c", "M2", "buy", NOW),
+                  self._t("a", "M3", "buy", NOW - 50), self._t("a", "M3", "sell", NOW)]
+        pe.save_token_scores(c, "sol", trades, weights, NOW)
+        published = dict(c.execute("SELECT token_mint,score FROM token_scores"))
+
+        for m, ws in pe.cluster("sol", trades, weights, NOW).items():
+            _, score = pe.score_of(ws, weights)
+            if score > 0:
+                self.assertAlmostEqual(published[m], score, msg=f"{m} disagrees with enter()")
+        self.assertAlmostEqual(published["M1"], 0.3125)
+        self.assertNotIn("M3", published, "a wallet that sold out leaves no score behind")
+
+
 class ReEntryTests(unittest.TestCase):
     """paper_positions.token_mint is a PRIMARY KEY, so a token traded once leaves a
     closed row behind. Re-entering it after the cooldown used to raise IntegrityError,
