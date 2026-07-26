@@ -985,6 +985,84 @@ class GmgnCliTests(unittest.TestCase):
                 self.assertEqual(env[key], config.get(key))
 
 
+class ConfigDocumentationTests(unittest.TestCase):
+    """.env.example is the only place a tunable is discoverable, so it must be complete.
+
+    Every knob added during hardening was invisible to anyone reading the repo until
+    this test started failing for them.
+    """
+
+    # Sentinels used by the tests above, and the machine-wide path config.py reads
+    # before .env exists.
+    NOT_TUNABLES = {"SENTINEL_JUNK_INT", "SENTINEL_NOT_A_REAL_KEY", "SENTINEL_OVERRIDE_CHECK",
+                    "SENTINEL_ENV_FILE", "PYTHONIOENCODING"}
+
+    def _keys_read_by_code(self):
+        source_dir = pathlib.Path(__file__).resolve().parent
+        pattern = re.compile(r"\bget(?:_int|_float|_bool|_list)?\(\s*[\"']([A-Z][A-Z0-9_]+)[\"']")
+        found = set()
+        for path in sorted(source_dir.glob("*.py")):
+            if path.name.startswith("test_"):
+                continue
+            found |= set(pattern.findall(path.read_text(encoding="utf-8")))
+        return found - self.NOT_TUNABLES
+
+    def _keys_in_example(self):
+        example = pathlib.Path(__file__).resolve().parent.parent / ".env.example"
+        pattern = re.compile(r"^\s*#?\s*([A-Z][A-Z0-9_]+)\s*=", re.M)
+        return set(pattern.findall(example.read_text(encoding="utf-8")))
+
+    def test_every_tunable_is_documented(self):
+        missing = sorted(self._keys_read_by_code() - self._keys_in_example())
+        self.assertEqual(missing, [], f"add these to .env.example: {missing}")
+
+    def test_documented_defaults_match_the_code(self):
+        """A default written in .env.example must be the default the code actually uses.
+
+        Documented values are compared against the literal passed to get_*() in the
+        source — not against a getter call, which would just echo whatever default the
+        test itself supplied.
+        """
+        source_dir = pathlib.Path(__file__).resolve().parent
+        # The default is either a quoted string (which may contain commas, as
+        # TUNNEL_PROTOCOLS does) or a bare token. Anything that is an expression rather
+        # than a literal — MAX_HOLD*2, _reachable_from_outside() — has no fixed value to
+        # compare against and is skipped.
+        call = re.compile(
+            r"\bget(?:_int|_float|_bool)?\(\s*[\"']([A-Z][A-Z0-9_]+)[\"']\s*,\s*"
+            r"(\"[^\"]*\"|'[^']*'|[0-9][0-9_.eE+-]*|True|False)\s*[,)]")
+        code_defaults = {}
+        for path in sorted(source_dir.glob("*.py")):
+            if path.name.startswith("test_"):
+                continue
+            for key, literal in call.findall(path.read_text(encoding="utf-8")):
+                code_defaults.setdefault(key, literal.strip("\"'"))
+
+        example = (source_dir.parent / ".env.example").read_text(encoding="utf-8")
+        documented = re.findall(r"^#\s*([A-Z][A-Z0-9_]+)=\"([^\"]*)\"", example, re.M)
+
+        mismatched = []
+        for key, shown in documented:
+            expected = code_defaults.get(key)
+            if expected is None or not shown:
+                continue
+            try:
+                same = abs(float(shown) - float(expected)) < 1e-9
+            except ValueError:
+                same = shown == expected
+            if not same:
+                mismatched.append(f"{key}: example says {shown!r}, code uses {expected!r}")
+        self.assertEqual(mismatched, [], "\n".join(mismatched))
+
+    def test_example_documents_nothing_imaginary(self):
+        # A key in .env.example that no code reads is a promise the project does not keep.
+        source_dir = pathlib.Path(__file__).resolve().parent
+        blob = "\n".join(p.read_text(encoding="utf-8") for p in source_dir.glob("*.py")
+                         if not p.name.startswith("test_"))
+        phantom = [k for k in sorted(self._keys_in_example()) if f'"{k}"' not in blob]
+        self.assertEqual(phantom, [], f"documented but never read: {phantom}")
+
+
 class AuthDefaultTests(unittest.TestCase):
     """Whether the panel demands a signature must follow how reachable it is."""
 
