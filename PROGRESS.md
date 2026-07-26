@@ -1731,3 +1731,82 @@ Live after both: engine cycling, webapp `auth required`, panel over the tunnel
 
 **Уверенность: средне-высокая.** Pass 26 не чист — 2 находки, обе серьёзные, одна из них
 исправление моего же исправления. Счётчик чистых проходов **0**.
+
+## Pass 27 — measuring the funnel, and a fixture that made a test prove nothing
+
+Lens: measurement over reading. The last two passes' best findings came from the live
+database rather than the source, so this pass started by instrumenting the entry funnel
+end to end and following what it showed.
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 99 | Medium | `GMGN_FEED_LIMIT` defaulted to 200; the API returns **100 whatever is asked** (measured at 100/150/200/500). The config read as "we sample 200 trades a poll" and never did | Default and template corrected to 100, cap documented | `e2abe3c` |
+| 100 | Medium | `learn_new_makers` fetched stats for unknown makers and *then* discarded blacklisted ones. Blacklisted wallets are **21 of 22** unknown makers in a live sample, so nearly the whole per-cycle stats budget bought rows thrown away on the next line, every poll, ahead of `enter()` | Filtered before the call | `a74c9a3` |
+| 101 | **High** | `mint_n()` built its prefix with `f"{i:04d}"`. Base58 has no `0`, so **every address it ever produced was rejected** by `valid_address` | Prefix encoded in base58 | `a74c9a3` |
+
+### 101: the helper written to prevent vacuous tests was causing them
+
+The header of the test file says, in as many words, that short placeholders "would be
+dropped before reaching the code under test, and several assertions would then pass
+vacuously". `mint_n`'s own docstring said "valid mints". It produced an invalid address
+for all 1000 values checked, and had presumably always done so.
+
+`test_backlog_is_capped` feeds 100 trades to `missed_elite_signals` to prove the
+per-cycle cap clips them:
+
+```
+old mint_n   MISSED produced:  0   assertion 0 <= 10   (vacuous)
+new mint_n   MISSED produced: 10   assertion 10 <= 10  (real)
+```
+
+It was asserting that zero is at most ten. An AST sweep of every address-shaped literal
+in the suite found no others — `mint_n` was the only one, and the whole suite still
+passes with valid addresses, so nothing else depended on them being rejected.
+
+### The funnel, measured on live feed data
+
+```
+feed trades returned            100        <- asked for 200
+  passing allowed() pump filter  90
+  buys inside the 30-min window  51
+distinct makers                  28
+  known to wallet_watch           6
+  BLACKLISTED                    21        <- can never be re-added
+  genuinely new                   1
+best cluster score              0.25       threshold 1.0
+```
+
+`allowed()` is not the constraint — 90% of the feed passes it. **The blacklist is.**
+Three quarters of the wallets actively buying in the feed are permanently excluded,
+against 5614 blacklisted versus 1184 watched. `enter()` needs 1.0 and each poll's
+cluster can draw only on those six; the best score over 572 cycles is 0.4375.
+Convergence is not possible on a pool that excludes most of its own feed.
+
+`ISSUES.md` #1 previously asserted "the signal pool stays smaller than it should be"
+with no number. It now carries this table. Still not running `unban_wallets.py` — it
+changes which wallets the engine follows — but the decision now has evidence behind it
+rather than a plausible story.
+
+### Checked and found clean
+
+Pass 26 disabled `allow_reuse_address` on Windows, which raised the question of whether
+the webapp could then fail to rebind after a supervisor restart with live connections —
+a restart loop at exactly the hourly moment the tunnel republishes. Tested both
+directions, client-side and server-side close, with keep-alive connections open:
+
+```
+allow_reuse_address=True   rebind after server-side close: OK
+allow_reuse_address=False  rebind after server-side close: OK
+```
+
+Windows does not block a bind on a port whose connections are in TIME_WAIT when no
+listener holds it. No risk, and the live webapp has restarted cleanly through it.
+
+```
+$ python -m unittest discover -s gmgn -p 'test_*.py'
+Ran 262 tests in 15.227s
+OK
+```
+
+**Уверенность: средне-высокая.** Pass 27 не чист — 3 находки. Счётчик чистых проходов
+**0**.
