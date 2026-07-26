@@ -192,6 +192,64 @@ class WalletEligibilityTests(unittest.TestCase):
         self.assertIn("returner", pe.cached_weights(c, "sol"))
 
 
+class EliteCalloutTests(unittest.TestCase):
+    """The feed replays its recent trades every poll, so call-outs must fire per trade."""
+
+    def _seed_elite(self, c, address="elite", winrate=0.95):
+        c.execute("INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) "
+                  "VALUES(?,?,?,?,?,?)", (address, "sol", "gmgn", 0, winrate, 0))
+
+    def _buy(self, maker, mint_, ts):
+        return {"maker": maker, "base_address": mint_, "side": "buy", "timestamp": ts,
+                "price_usd": 1.0, "launchpad": "pump"}
+
+    def _count(self, c):
+        return c.execute("SELECT COUNT(*) FROM engine_events WHERE kind='WALLET_BUY'").fetchone()[0]
+
+    def test_known_elite_wallet_triggers_a_callout(self):
+        # Regression: eligibility used to come from the freshly fetched stats of newly
+        # seen makers, so a wallet already on the watch list never triggered anything.
+        c = fresh_db()
+        self._seed_elite(c)
+        pe.elite_buy_callouts(c, "sol", [self._buy("elite", "M", NOW)], NOW, since=NOW - 10)
+        self.assertEqual(self._count(c), 1)
+
+    def test_replayed_trade_is_not_announced_twice(self):
+        c = fresh_db()
+        self._seed_elite(c)
+        trades = [self._buy("elite", "M", NOW - 5)]
+        pe.elite_buy_callouts(c, "sol", trades, NOW, since=NOW - 10)
+        pe.elite_buy_callouts(c, "sol", trades, NOW + 15, since=NOW)  # same trade, next poll
+        self.assertEqual(self._count(c), 1, "the same trade must announce once")
+
+    def test_first_cycle_after_start_announces_nothing(self):
+        c = fresh_db()
+        self._seed_elite(c)
+        trades = [self._buy("elite", f"M{i}", NOW - i) for i in range(50)]
+        pe.elite_buy_callouts(c, "sol", trades, NOW, since=0)
+        self.assertEqual(self._count(c), 0, "a fresh start must not replay the whole feed")
+
+    def test_backlog_is_capped(self):
+        c = fresh_db()
+        self._seed_elite(c)
+        trades = [self._buy("elite", f"M{i}", NOW - i) for i in range(100)]
+        pe.elite_buy_callouts(c, "sol", trades, NOW, since=NOW - 100000)
+        self.assertLessEqual(self._count(c), pe.ELITE_CALLOUTS_MAX)
+
+    def test_sub_elite_wallet_is_ignored(self):
+        c = fresh_db()
+        self._seed_elite(c, "decent", 0.75)
+        pe.elite_buy_callouts(c, "sol", [self._buy("decent", "M", NOW)], NOW, since=NOW - 10)
+        self.assertEqual(self._count(c), 0)
+
+    def test_sells_are_ignored(self):
+        c = fresh_db()
+        self._seed_elite(c)
+        sell = self._buy("elite", "M", NOW) | {"side": "sell"}
+        pe.elite_buy_callouts(c, "sol", [sell], NOW, since=NOW - 10)
+        self.assertEqual(self._count(c), 0)
+
+
 class ExitRobustnessTests(unittest.TestCase):
     """exits() is the stop-loss path: one bad row must not abort the whole sweep."""
 

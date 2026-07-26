@@ -287,8 +287,38 @@ def learn_new_makers(c,chain,trades,now):
  return stats
 def heartbeat(c,now,detail=""):
  c.execute("INSERT INTO engine_state(key,value,updated_at) VALUES('last_cycle',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(detail or str(now),now))
+def last_cycle_ts(c):
+ row=c.execute("SELECT updated_at FROM engine_state WHERE key='last_cycle'").fetchone()
+ return row[0] if row else 0
+ELITE_WINRATE=config.get_float("GMGN_ELITE_WINRATE",0.90)
+ELITE_CALLOUTS_MAX=config.get_int("GMGN_ELITE_CALLOUTS_MAX",10)
+def elite_buy_callouts(c,chain,trades,now,since):
+ """Announce a top-winrate wallet buying into a token.
+
+ The feed replays its last few hundred trades on every poll, so this has to fire once
+ per trade, not once per poll: only trades newer than the previous cycle count. On the
+ first cycle after a start there is no previous cycle to compare against, so nothing is
+ announced rather than replaying the whole feed. A long outage is likewise clamped to
+ one cluster window, and the batch is capped, so a backlog cannot flood Telegram.
+
+ Eligibility comes from wallet_watch, not from the freshly fetched stats of newly seen
+ makers — otherwise an already-known elite wallet would never trigger a call-out."""
+ if not since: return
+ cutoff=max(since,now-WINDOW)
+ elite=dict(c.execute("SELECT address,winrate FROM wallet_watch WHERE chain=? AND active=1 AND winrate>=?",(chain,ELITE_WINRATE)))
+ if not elite: return
+ seen=set(); sent=0
+ for t in sorted(trades,key=stamp,reverse=True):
+  w=wallet(t); m=mint(t)
+  if not (w in elite and m and quote(t)=="buy" and stamp(t)>cutoff): continue
+  if (w,m) in seen: continue
+  seen.add((w,m))
+  emit(c,"WALLET_BUY",f"кошелёк {w[:12]}... зашёл в монету {m} (wr={elite[w]*100:.0f}%)")
+  sent+=1
+  if sent>=ELITE_CALLOUTS_MAX:
+   LOG.info("elite call-outs capped at %d this cycle on %s",ELITE_CALLOUTS_MAX,chain); return
 def cycle(c):
- now=int(time.time())
+ now=int(time.time()); since=last_cycle_ts(c)
  for chain in CHAINS:
   # 1. Feed first — one fast call, and the only hard dependency of the exit path.
   try: trades=list_rows(cli(["track","smartmoney","--chain",chain,"--limit",str(LIMIT)]))
@@ -298,14 +328,10 @@ def cycle(c):
   exits(c,chain,trades,now); c.commit()
   if not trades: continue
   # 3. Entry decisions off cached winrates, plus a bounded lookup of unseen makers.
-  stats=learn_new_makers(c,chain,trades,now)
+  learn_new_makers(c,chain,trades,now)
   weights=cached_weights(c,chain)
   enter(c,chain,trades,weights,now); save_token_scores(c,chain,trades,weights,now)
-  # 90%+ call-outs: эмитим сигнал когда профитный кошелёк входит в монету
-  for t in trades:
-   w=wallet(t); m=mint(t)
-   if w and m and w in stats and quote(t)=="buy" and wr(stats[w])>=.90:
-    emit(c,"WALLET_BUY",f"кошелёк {w[:12]}... зашёл в монету {m} (wr={wr(stats[w])*100:.0f}%)")
+  elite_buy_callouts(c,chain,trades,now,since)
   # 4. Background bookkeeping, throttled so it cannot dominate the loop. The last run is
   # persisted so a restart loop cannot hammer the stats API.
   if chain not in _last_maint:
