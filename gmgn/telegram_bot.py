@@ -183,17 +183,21 @@ def _fmt_price(p: float) -> str:
 
 
 def reply(c: sqlite3.Connection, command: str) -> str:
-    """text(), but a database that is missing or half-built answers instead of hanging.
+    """text(), but a failure answers the user instead of vanishing.
 
-    On a fresh install the bot can start before the engine has ever created its tables;
-    an unhandled OperationalError there escapes to the poll loop, which logs and sleeps,
-    so the user sees nothing at all.
+    Anything raised here escapes to the poll loop, which logs and sleeps — and because
+    the update offset has already advanced, the command is never retried. The user just
+    sees silence. Every failure therefore has to come back as a message.
     """
     try:
         return text(c, command)
     except sqlite3.OperationalError as e:
+        # Typically a fresh install where the engine has not created its tables yet.
         LOG.warning("query failed for %s: %s", command, e)
         return f"База ещё не готова ({e}). Запусти движок: python gmgn/run_engine.py"
+    except Exception as e:
+        LOG.exception("command %s failed", command)
+        return f"Не смог собрать ответ на {command}: {type(e).__name__}: {e}"
 
 
 def text(c: sqlite3.Connection, command: str) -> str:
@@ -341,8 +345,13 @@ def main():
                 parts = (msg.get("text") or "").split()
                 if not parts or chat != CHAT:
                     continue
-                api("sendMessage", {"chat_id": chat, "text": reply(c, parts[0].split("@")[0]),
-                                    "reply_markup": keyboard()})
+                try:
+                    api("sendMessage", {"chat_id": chat, "text": reply(c, parts[0].split("@")[0]),
+                                        "reply_markup": keyboard()})
+                except Exception as e:
+                    # One undeliverable reply must not abandon the updates behind it;
+                    # their offsets are already consumed, so they would be lost.
+                    LOG.warning("could not answer %s: %s", parts[0], e)
         except Exception as e:
             if "409" in str(e):
                 # Another poller grabbed the same token — drop the backlog and resync.

@@ -954,6 +954,47 @@ class GmgnCliTests(unittest.TestCase):
                 self.assertEqual(env[key], config.get(key))
 
 
+class StaticFileTests(unittest.TestCase):
+    """The panel is served over a public tunnel, so the file root must actually hold."""
+
+    def setUp(self):
+        import webapp
+        self.webapp = webapp
+
+    def test_root_serves_the_page(self):
+        target = self.webapp.resolve_static("/")
+        self.assertIsNotNone(target)
+        self.assertEqual(target.name, "index.html")
+
+    def test_traversal_is_refused(self):
+        for path in ("/../config.py", "/../../.env", "/..%2f..%2f.env",
+                     "/./../../gmgn/config.py", "//../.env"):
+            with self.subTest(path=path):
+                self.assertIsNone(self.webapp.resolve_static(path), f"{path} escaped the root")
+
+    def test_sibling_directory_prefix_is_refused(self):
+        # The containment test used to be a string prefix, so with a root of
+        # ".../gmgn/webapp" a path resolving into ".../gmgn/webapp-evil" passed it.
+        root = self.webapp.STATIC_DIR.resolve()
+        sibling = root.parent / (root.name + "-evil")
+        sibling.mkdir(exist_ok=True)
+        secret = sibling / "secret.txt"
+        secret.write_text("should never be served", encoding="utf-8")
+        self.addCleanup(lambda: (secret.unlink(missing_ok=True), sibling.rmdir()))
+
+        self.assertIsNone(self.webapp.resolve_static(f"/../{sibling.name}/secret.txt"))
+
+    def test_absolute_windows_path_is_refused(self):
+        # Path("a") / "C:/x" is "C:/x" — an absolute operand replaces the base.
+        self.assertIsNone(self.webapp.resolve_static("/C:/Windows/win.ini"))
+
+    def test_missing_file_is_none_not_an_error(self):
+        self.assertIsNone(self.webapp.resolve_static("/nope.js"))
+
+    def test_empty_path_is_none(self):
+        self.assertIsNone(self.webapp.resolve_static("//"))
+
+
 class TunnelTests(unittest.TestCase):
     """The URL handed to the bot must be a URL that actually serves."""
 
@@ -1179,6 +1220,32 @@ class BotPushTests(unittest.TestCase):
         self.assertEqual(self.bot._last_event, 0, "the cursor must not advance past it")
         self.bot.push_events(c)                      # retry delivers both
         self.assertEqual(len(calls), 3)
+
+    def test_every_command_renders_against_an_empty_database(self):
+        c = fresh_db()
+        for cmd in ("/status", "/positions", "/trades", "/wallets", "/weights",
+                    "/config", "/help", "/start", "/unknown"):
+            with self.subTest(cmd=cmd):
+                out = self.bot.reply(c, cmd)
+                self.assertIsInstance(out, str)
+                self.assertTrue(out.strip(), f"{cmd} returned nothing")
+
+    def test_a_broken_command_answers_rather_than_going_silent(self):
+        # The update offset advances before the reply is sent, so a raised exception
+        # loses the command permanently — the user just sees silence.
+        c = fresh_db()
+        original = self.bot.text
+        self.bot.text = lambda conn, cmd: (_ for _ in ()).throw(ValueError("kaboom"))
+        try:
+            out = self.bot.reply(c, "/status")
+        finally:
+            self.bot.text = original
+        self.assertIn("kaboom", out)
+
+    def test_missing_tables_answer_with_what_to_do(self):
+        c = sqlite3.connect(":memory:")  # no schema at all
+        out = self.bot.reply(c, "/status")
+        self.assertIn("run_engine", out)
 
     def test_non_pushable_kinds_advance_the_cursor(self):
         c = fresh_db()

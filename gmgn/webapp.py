@@ -387,8 +387,34 @@ def _limit(q: dict, default: int, cap: int) -> int:
         return default
 
 
+def resolve_static(path: str) -> Path | None:
+    """Map a URL path to a file inside STATIC_DIR, or None.
+
+    The containment test is Path.is_relative_to, not a string prefix: STATIC_DIR is
+    ".../gmgn/webapp", and a prefix test also accepts ".../gmgn/webapp-anything".
+    On Windows there is a second trap — `Path("a") / "C:/x"` is "C:/x", because pathlib
+    lets an absolute operand replace the base — so a request for "/C:/…" must be
+    rejected by containment rather than assumed to stay under the root.
+    """
+    rel = "index.html" if path == "/" else path.lstrip("/")
+    if not rel:
+        return None
+    root = STATIC_DIR.resolve()
+    try:
+        target = (root / rel).resolve()
+        if not target.is_relative_to(root) or not target.is_file():
+            return None
+    except (OSError, ValueError):  # malformed path, name too long, bad drive
+        return None
+    return target
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "sentinel-webapp"
+    protocol_version = "HTTP/1.1"
+    # Without this a half-open connection pins a thread forever, and ThreadingHTTPServer
+    # spawns one per connection with no cap.
+    timeout = config.get_int("WEBAPP_REQUEST_TIMEOUT", 30)
 
     def log_message(self, fmt, *args):  # quieter than the stdlib default
         LOG.debug("%s - %s", self.address_string(), fmt % args)
@@ -433,18 +459,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, handler(query))
             except sqlite3.OperationalError as e:
                 LOG.warning("db: %s", e)
-                return self._json(503, {"error": f"database unavailable: {e}"})
-            except Exception as e:
+                return self._json(503, {"error": "database unavailable"})
+            except Exception:
+                # The detail goes to the log, not to the response: over a public tunnel
+                # an exception string can disclose filesystem paths.
                 LOG.exception("api %s", path)
-                return self._json(500, {"error": str(e)})
+                return self._json(500, {"error": "internal error"})
 
-        # Static files, confined to STATIC_DIR.
-        rel = "index.html" if path == "/" else path.lstrip("/")
-        target = (STATIC_DIR / rel).resolve()
-        if not str(target).startswith(str(STATIC_DIR.resolve())) or not target.is_file():
+        target = resolve_static(path)
+        if target is None:
             return self._send(404, b"not found", "text/plain; charset=utf-8")
         ctype = MIME.get(target.suffix, "application/octet-stream")
-        self._send(200, target.read_bytes(), ctype)
+        try:
+            body = target.read_bytes()
+        except OSError as e:
+            LOG.warning("static %s: %s", target, e)
+            return self._send(404, b"not found", "text/plain; charset=utf-8")
+        self._send(200, body, ctype)
 
 
 def serve(host: str | None = None, port: int | None = None, block: bool = True):
