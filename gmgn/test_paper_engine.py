@@ -1151,11 +1151,24 @@ class WinrateParsingTests(unittest.TestCase):
         self.assertLess(wrv, 0.90, "75% must not clear the 90% elite gate")
         self.assertEqual(pe.weight(wrv), 0.25)
 
-    def test_mass_discovery_agrees_with_the_engine(self):
+    def test_every_module_that_parses_a_winrate_agrees_with_the_engine(self):
+        """Three modules parse win rates. All three must scale the same way.
+
+        The flaw was fixed in paper_engine and mass_discovery in Pass 2 and survived in
+        monitor.py until Pass 11 — where a wallet reporting 75 under `win_rate` became
+        75.0 and cleared MIN_WINRATE for entirely the wrong reason.
+        """
         import mass_discovery as md
-        for key in ("winrate", "win_rate"):
-            self.assertAlmostEqual(md.number({key: 75}, key), 0.75)
-            self.assertAlmostEqual(md.number({key: 0.75}, key), 0.75)
+        import monitor
+
+        for parse in (pe.n, md.number, monitor.number):
+            for key in ("winrate", "win_rate"):
+                with self.subTest(parser=parse.__module__, key=key):
+                    self.assertAlmostEqual(parse({key: 75}, key), 0.75)
+                    self.assertAlmostEqual(parse({key: 0.75}, key), 0.75)
+                    self.assertAlmostEqual(parse({key: 100}, key), 1.0)
+            # And none of them scales a field that merely holds a large number.
+            self.assertEqual(parse({"buy_count": 75}, "buy_count"), 75.0)
 
 
 class GmgnCliTests(unittest.TestCase):

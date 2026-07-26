@@ -28,7 +28,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
 from paper_engine import _find_gmgn as pe_find_gmgn  # noqa: E402
-from paper_engine import gmgn_cli  # noqa: E402
+from paper_engine import _is_winrate_key, gmgn_cli  # noqa: E402
 
 LOG = logging.getLogger("gmgn-monitor")
 # Read through config.py so the repo-local .env applies here too, rather than requiring
@@ -106,9 +106,18 @@ def number(obj: dict[str, Any], *keys: str, default: float = 0.0) -> float:
         if value is not None:
             try:
                 parsed = float(value)
-                return parsed / 100.0 if "winrate" in key and parsed > 1 else parsed
             except (TypeError, ValueError):
-                pass
+                continue  # try the next key rather than give up on the whole lookup
+            # Shared with the engine: a plain `"winrate" in key` test is False for
+            # "win_rate", so a percentage under that spelling was never scaled. 75 stayed
+            # 75.0, which clears MIN_WINRATE and every other gate that expects a ratio.
+            if _is_winrate_key(key):
+                if parsed > 1:
+                    parsed /= 100.0
+                if not 0 <= parsed <= 1:
+                    LOG.warning("ignoring out-of-range winrate %r from %s", value, key)
+                    continue
+            return parsed
     return default
 
 
