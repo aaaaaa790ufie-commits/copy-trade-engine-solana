@@ -1520,3 +1520,67 @@ Mini App button reinstalled, per the supervisor log at 22:55:24.
 
 **Уверенность: средне-высокая.** Pass 23 не чист — 4 находки, одна из них снова в коде
 предыдущего прохода. Счётчик чистых проходов **0**. Продолжаю Pass 24.
+
+## Pass 24 — settings that do nothing, and notifications nobody can read
+
+Lens: the gap between what a thing is documented to do and what it does. Two findings,
+and two deliberate verified negatives.
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 92 | Medium | Wallet bookkeeping was a push notification. Measured on the live journal: **60 `WALLET` messages in 24h against 4 entries and 4 exits** — the eight that matter arriving at 7:1 odds against a counter incrementing by one | Throttled at push time, one per hour; the journal and panel stay complete | `a594f5d` |
+| 93 | Medium | **`PAPER_BUDGET_SOL` did nothing.** Documented in `.env.example`, `CLAUDE.md` and `README.md` as the starting balance, read into `config.BUDGET_SOL` — and the account row was seeded by a literal `0.1` inside `init()`'s `executescript()`, which takes no parameters | Insert moved out and parameterised, `OR IGNORE` kept | `3ec778f` |
+
+### 93 is the interesting one, because three tests should have caught it and none could
+
+The `.env.example` consistency suite checks that every documented key is *read* by the
+code and that documented defaults match the literals. `PAPER_BUDGET_SOL` passed both: it
+is read, into a constant, and the default matches. What no test checked was whether
+reading it had any **effect** — a value can be resolved and then consumed by nobody.
+
+```
+$ PAPER_BUDGET_SOL=0.5 …init(fresh database)…
+config.BUDGET_SOL reads : 0.5
+fresh account created as: 0.1 / 0.1
+```
+
+It survived because the one place the value *was* consumed — `reset_account.py --target`
+— is a different code path that worked correctly, so the setting appeared functional
+whenever anyone tested it.
+
+Afterwards, an AST sweep over all 20 settings resolved in `config.py` checked each is
+referenced outside it. All 20 are. Recorded with the caveat that matters: **this sweep
+would not have found the bug it was written after**, because `config.BUDGET_SOL` *was*
+referenced, just from the wrong path. It is a necessary check, not a sufficient one.
+
+### Verified negatives
+
+- **Money conservation under randomised sequences.** Twelve seeded interleavings, 50
+  steps each, invariants re-checked after every step: 175 entries, 167 exits, 84 max
+  hold / 45 trailing / 38 hard stop. No defect. The check itself was verified by
+  corrupting a balance by 0.001 and confirming it fails, so the pass means the books
+  balanced rather than that nothing was examined. (`467aa9d`)
+- **`push_events` throughput.** `WALLET` looked like it might not be in `PUSH_KINDS`,
+  which would have made the batch limit apply to rows rather than to sends. It is in
+  `PUSH_KINDS`. No issue.
+- **`WALLET_BUY`** exists in the journal (2 rows) but nothing emits it — inert legacy
+  data from a removed feature, not a live path.
+
+### One of my own tests caught one of my own bugs, within the minute
+
+`due_for_push` used `0.0` for "never sent" and subtracted. Against a real clock that is
+correct only because `time.time()` dwarfs any interval; under the test's clock it
+suppressed the first message of every kind. `None` now means never. Worth recording
+because the test was written before the code was trusted, not after it was believed.
+
+```
+$ python -m unittest discover -s gmgn -p 'test_*.py'
+Ran 243 tests in 12.693s
+OK
+```
+
+Live account unaffected by 93 (`0.1 / 0.16899` before and after — `OR IGNORE` leaves an
+existing row alone). Bot restarted onto the throttle at 23:04:48.
+
+**Уверенность: средне-высокая.** Pass 24 не чист — 2 находки. Счётчик чистых проходов
+остаётся **0**.
