@@ -45,10 +45,16 @@ _last_pushed_at: dict[str, float] = {}
 
 
 def due_for_push(kind: str, now: float) -> bool:
-    """Whether this kind may be sent now, given its throttle. Stateful: records the send.
+    """Whether this kind may be sent now, given its throttle. Pure — asking is free.
 
     Only throttled kinds are affected; ENTRY, EXIT, ERROR and the rest are never
     delayed, because those are the ones the operator is waiting for.
+
+    Deliberately does not record anything. It used to, and that made a failed send
+    lose its message: the send was marked as having happened, `push_events` returned
+    without advancing the cursor, and on the retry pass the throttle suppressed the very
+    event being retried — after which the cursor moved past it. `mark_pushed` is called
+    only once the message is actually out.
     """
     interval = PUSH_INTERVALS.get(kind, 0)
     if interval <= 0:
@@ -58,10 +64,13 @@ def due_for_push(kind: str, now: float) -> bool:
     # gives the right answer against a real clock only because time.time() dwarfs any
     # interval — it would suppress the first message of every kind under any other
     # clock, which is a coincidence holding the behaviour up rather than a rule.
-    if last is not None and now - last < interval:
-        return False
-    _last_pushed_at[kind] = now
-    return True
+    return last is None or now - last >= interval
+
+
+def mark_pushed(kind: str, now: float) -> None:
+    """Record a message that actually reached Telegram."""
+    if PUSH_INTERVALS.get(kind, 0) > 0:
+        _last_pushed_at[kind] = now
 
 
 def api(method: str, data: dict | None = None) -> dict:
@@ -209,6 +218,7 @@ def push_events(c: sqlite3.Connection) -> None:
         if kind in PUSH_KINDS and due_for_push(kind, time.time()):
             try:
                 api("sendMessage", {"chat_id": CHAT, "text": f"{ICONS.get(kind, '•')} {kind}: {msg}"})
+                mark_pushed(kind, time.time())   # only once it is genuinely out
                 time.sleep(0.35)
             except Exception as e:
                 # Leave the cursor where it is so the event is retried, rather than

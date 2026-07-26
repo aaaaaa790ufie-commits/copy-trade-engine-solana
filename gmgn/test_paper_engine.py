@@ -3044,6 +3044,7 @@ class PushThrottleTests(unittest.TestCase):
     def test_a_noisy_kind_is_thinned_to_one_per_interval(self):
         interval = self.bot.PUSH_INTERVALS["WALLET"]
         self.assertTrue(self.bot.due_for_push("WALLET", 1000.0))
+        self.bot.mark_pushed("WALLET", 1000.0)          # the send is what starts the clock
         self.assertFalse(self.bot.due_for_push("WALLET", 1000.0 + interval - 1))
         self.assertTrue(self.bot.due_for_push("WALLET", 1000.0 + interval))
 
@@ -3053,6 +3054,47 @@ class PushThrottleTests(unittest.TestCase):
         self.addCleanup(lambda: self.bot.PUSH_INTERVALS.update(saved))
         for i in range(5):
             self.assertTrue(self.bot.due_for_push("WALLET", 1000.0 + i))
+
+    def _push_with(self, c, api):
+        saved_api, saved_cursor, saved_ev = self.bot.api, self.bot.save_cursor, self.bot._last_event
+        self.bot.api, self.bot.save_cursor = api, lambda v: None
+        self.addCleanup(lambda: setattr(self.bot, "api", saved_api))
+        self.addCleanup(lambda: setattr(self.bot, "save_cursor", saved_cursor))
+        self.addCleanup(lambda: setattr(self.bot, "_last_event", saved_ev))
+        self.bot.push_events(c)
+
+    def test_a_throttled_message_is_not_lost_when_its_send_fails(self):
+        """push_events leaves the cursor put on a failed send so the event is retried.
+        The throttle broke that: it recorded the send at the moment it *decided* to
+        send, so the retry pass found the kind throttled, skipped the event, and moved
+        the cursor past it. The message was dropped, silently, by the code whose comment
+        says "will retry"."""
+        c = fresh_db()
+        c.execute("INSERT INTO engine_events(event_ts,kind,message) VALUES(?,?,?)",
+                  (NOW, "WALLET", "+1 wallet"))
+        c.commit()
+
+        sent, attempts = [], []
+
+        def flaky(method, data=None):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError("502 Bad Gateway")
+            sent.append(data["text"])
+            return {}
+
+        self.bot._last_event = 0
+        self._push_with(c, flaky)          # fails
+        self.assertEqual(sent, [], "nothing delivered yet")
+        self._push_with(c, flaky)          # retries
+        self.assertEqual(len(sent), 1, "the retried message must actually arrive")
+
+    def test_the_throttle_only_starts_once_a_message_is_out(self):
+        # A send that never happened must not start the clock on the next one.
+        self.assertTrue(self.bot.due_for_push("WALLET", 1000.0))
+        self.assertTrue(self.bot.due_for_push("WALLET", 1000.0), "asking must not consume")
+        self.bot.mark_pushed("WALLET", 1000.0)
+        self.assertFalse(self.bot.due_for_push("WALLET", 1000.0))
 
     def test_throttling_does_not_stall_the_cursor(self):
         # A suppressed event must still be marked as processed, or the bot re-reads it
