@@ -40,8 +40,22 @@ STATIC_DIR = Path(__file__).resolve().parent / "webapp"
 # initData signatures older than this are rejected even if the HMAC is valid,
 # so a captured URL cannot be replayed indefinitely.
 INIT_DATA_MAX_AGE = config.get_int("WEBAPP_INITDATA_MAX_AGE", 86400)
+
+LOOPBACK = ("127.0.0.1", "::1", "localhost")
+
+
+def _reachable_from_outside() -> bool:
+    """True when the panel is not confined to this machine.
+
+    A public origin is the obvious case, but binding to 0.0.0.0 exposes it to the whole
+    LAN just as effectively — and defaulting auth off there would serve the account and
+    wallet data to anyone on the network.
+    """
+    return bool(config.WEBAPP_PUBLIC_URL) or config.WEBAPP_HOST not in LOOPBACK
+
+
 # Auth is mandatory as soon as the app is reachable from outside this machine.
-REQUIRE_AUTH = config.get_bool("WEBAPP_REQUIRE_AUTH", bool(config.WEBAPP_PUBLIC_URL))
+REQUIRE_AUTH = config.get_bool("WEBAPP_REQUIRE_AUTH", _reachable_from_outside())
 
 MIME = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
         ".js": "application/javascript; charset=utf-8", ".svg": "image/svg+xml",
@@ -481,6 +495,15 @@ class Handler(BaseHTTPRequestHandler):
 def serve(host: str | None = None, port: int | None = None, block: bool = True):
     host = host or config.WEBAPP_HOST
     port = port or config.WEBAPP_PORT
+    # --host is a CLI argument, so it can differ from the value REQUIRE_AUTH was
+    # computed from at import. Serving the account and wallet data unauthenticated to
+    # the whole LAN should take a deliberate act, not a forgotten flag.
+    if host not in LOOPBACK and not REQUIRE_AUTH and not config.get("WEBAPP_REQUIRE_AUTH"):
+        raise SystemExit(
+            f"refusing to serve on {host} without authentication.\n"
+            "Set WEBAPP_PUBLIC_URL (which enables initData checking), or set "
+            "WEBAPP_REQUIRE_AUTH=0 explicitly if this network is trusted."
+        )
     stop = threading.Event()
     threading.Thread(target=_price_refresher, args=(stop,), daemon=True, name="prices").start()
     httpd = ThreadingHTTPServer((host, port), Handler)

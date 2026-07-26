@@ -201,8 +201,16 @@ class Tunnel:
         threading.Thread(target=self._read, args=(self.proc, generation, url_re, ready_re),
                          daemon=True, name="tunnel-log").start()
         if not (self._ready.wait(START_TIMEOUT) and self.url):
+            self.url = ""
             return False
-        return self._serves()
+        if self._serves():
+            return True
+        # The hostname was parsed but the origin does not answer. Clearing it matters:
+        # callers treat a non-empty self.url as "we have a working tunnel", and watch()
+        # compares against it to decide whether a reconnect produced a new URL.
+        self.url = ""
+        self._ready.clear()
+        return False
 
     def _serves(self) -> bool:
         """Confirm the public URL actually answers before anyone is told about it.

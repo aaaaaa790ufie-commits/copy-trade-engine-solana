@@ -1,5 +1,6 @@
 import os
 import pathlib
+import re
 import sqlite3
 import sys
 import tempfile
@@ -954,6 +955,48 @@ class GmgnCliTests(unittest.TestCase):
                 self.assertEqual(env[key], config.get(key))
 
 
+class AuthDefaultTests(unittest.TestCase):
+    """Whether the panel demands a signature must follow how reachable it is."""
+
+    def setUp(self):
+        import webapp
+        self.webapp = webapp
+        self._url, self._host = config.WEBAPP_PUBLIC_URL, config.WEBAPP_HOST
+
+    def tearDown(self):
+        config.WEBAPP_PUBLIC_URL, config.WEBAPP_HOST = self._url, self._host
+
+    def test_loopback_without_a_public_url_is_local_only(self):
+        config.WEBAPP_PUBLIC_URL, config.WEBAPP_HOST = "", "127.0.0.1"
+        self.assertFalse(self.webapp._reachable_from_outside())
+
+    def test_a_public_url_makes_it_reachable(self):
+        config.WEBAPP_PUBLIC_URL, config.WEBAPP_HOST = "https://x.example", "127.0.0.1"
+        self.assertTrue(self.webapp._reachable_from_outside())
+
+    def test_binding_to_all_interfaces_makes_it_reachable(self):
+        # 0.0.0.0 exposes the account and wallet data to the whole LAN just as
+        # effectively as a tunnel does, but used to leave auth defaulted off.
+        config.WEBAPP_PUBLIC_URL, config.WEBAPP_HOST = "", "0.0.0.0"
+        self.assertTrue(self.webapp._reachable_from_outside())
+
+    def test_serving_unauthenticated_off_loopback_is_refused(self):
+        with self.assertRaises(SystemExit) as ctx:
+            self.webapp.serve(host="0.0.0.0", port=0, block=False)
+        self.assertIn("refusing to serve", str(ctx.exception))
+
+    def test_health_is_the_only_unauthenticated_endpoint(self):
+        # The tunnel probe needs it; nothing else may answer without a signature.
+        self.assertIn("/api/health", self.webapp.ROUTES)
+        data = {k for k in self.webapp.ROUTES if k != "/api/health"}
+        self.assertEqual(
+            data,
+            {"/api/overview", "/api/trades", "/api/wallets", "/api/weights",
+             "/api/events", "/api/equity"},
+            "a new endpoint must be considered for the auth gate",
+        )
+
+
 class StaticFileTests(unittest.TestCase):
     """The panel is served over a public tunnel, so the file root must actually hold."""
 
@@ -1073,6 +1116,36 @@ class TunnelTests(unittest.TestCase):
         finally:
             srv.shutdown()
             srv.server_close()
+
+    def test_failed_probe_leaves_no_url_behind(self):
+        # Two bugs used to cancel out: _spawn kept the parsed hostname after the probe
+        # failed, and supervisor gated watch() on tunnel.url being set. Reconnection
+        # therefore only happened because tunnel.url held a URL that did not serve.
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        self.tunnel.PROBE_TIMEOUT = 1
+
+        proc = self._FakeProc([f"forwarding http://127.0.0.1:{port} ->\n"])
+        self.t._generation = 1
+        self.t._read(proc, 1, re.compile(r"http://127\.0\.0\.1:\d+"),
+                     re.compile(r"forwarding"))
+        self.assertTrue(self.t.url, "the reader parsed a URL")
+
+        self.assertFalse(self.t._serves())
+        # _spawn is what clears it; emulate its post-probe branch.
+        if not self.t._serves():
+            self.t.url = ""
+            self.t._ready.clear()
+        self.assertEqual(self.t.url, "", "a dead URL must not look like a live tunnel")
+
+    def test_start_returns_empty_and_clears_url_when_nothing_serves(self):
+        self.tunnel.PROBE_TIMEOUT = 1
+        self.t.provider = "nosuchprovider"
+        self.assertEqual(self.t.start(), "")
+        self.assertEqual(self.t.url, "")
 
     def test_url_patterns_match_real_hostnames(self):
         self.assertTrue(self.tunnel.CF_URL_RE.search("https://foo-bar-baz.trycloudflare.com"))

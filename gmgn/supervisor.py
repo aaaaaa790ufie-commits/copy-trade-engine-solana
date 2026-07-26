@@ -191,7 +191,11 @@ def main() -> None:
     LOG.info("config: %s", config.ENV_PATH)
     LOG.info("mini app: http://%s:%d%s", config.WEBAPP_HOST, config.WEBAPP_PORT,
              f"  (public {config.WEBAPP_PUBLIC_URL})" if config.WEBAPP_PUBLIC_URL else "")
-    if tunnel and tunnel.url:
+    if tunnel:
+        # Watch whenever a tunnel was asked for, not only when the first attempt
+        # worked. Gating on tunnel.url used to mean a failed start left the Mini App
+        # local-only forever, with nothing retrying — and it only appeared to work
+        # because a failed probe left the dead hostname in tunnel.url.
         tunnel.watch(publish)
     try:
         supervise(children)
