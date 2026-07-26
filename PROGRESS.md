@@ -582,3 +582,59 @@ stopped at the first comma, so a quoted default containing one
 **Confidence that `gmgn/` is production-ready: high.** Pass 5 found one issue, so it
 was not clean either. The stopping condition needs two consecutive passes with
 nothing worth fixing; Pass 6 follows.
+
+## Pass 6 — 2026-07-26
+
+Lens: failure injection, adversarial input, and checking the documentation's factual
+claims rather than re-reading the code.
+
+### Found and fixed
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 50 | High | README states the runtime has "no private key, signing, swap submission". `gmgn_env()` had been injecting `GMGN_PRIVATE_KEY` into every `gmgn-cli` subprocess since `config.py` was introduced — a capability a paper engine has no business holding, and a regression introduced by this work | Signing key stripped by default, including one inherited from the ambient environment; `allow_signing=True` is the reviewable opt-in, and a test asserts no file uses it | `cfaddae` |
+
+Every call the engine makes was verified to work with the key withheld before the
+change was made: smart-money feed, portfolio stats, token info, KOL discovery. Live
+afterwards: key absent from the subprocess environment, API key present, feed returns
+5 rows, token price 0.0012236521.
+
+### Checked and found sound — recorded, not changed
+
+**Adversarial input to the JSON API.** `limit` = `0`, `-5`, `99999999`, `abc`, empty,
+`1e400`, duplicated, `limit[]`, NUL byte, `' OR 1=1--`; paths with traversal, NUL
+bytes, case changes and a 3 KB query string. Every response was either 200 with the
+limit correctly clamped or 404 — no 500s, no tracebacks in the server log. Clamping
+was verified by row count, not by status code: `limit=0` returns 1 row, `limit=99999`
+returns 500 wallets and 300 events against caps of 500 and 300.
+
+**Failure injection.** A missing database yields 503 with no detail leaked, while
+`/api/health` and the page still serve. A `gmgn-cli` that exits non-zero leaves the
+cycle running, the position tracked, the heartbeat written, and raises the STUCK
+alert.
+
+**Fifteen minutes of continuous running.** 40 cycles, mean 7.9 s, slowest 9.4 s
+against a 15 s poll. Zero tracebacks, zero crash restarts, two intentional restarts
+(the tunnel republish). Memory flat at 17–25 MB per process. The only warnings are
+the expected tunnel-probe rejection sequence.
+
+**Stdlib-only claim.** An AST sweep of `gmgn/` finds no third-party import, as
+`CLAUDE.md` states.
+
+### Verification
+
+```
+$ python -m unittest test_paper_engine
+Ran 131 tests in 9.246s
+OK
+```
+
+### Still open
+
+`ISSUES.md` unchanged.
+
+**Confidence that `gmgn/` is production-ready: high.** Pass 6 was not clean — one
+high-severity finding, again a regression from this work rather than an inherited
+bug. Two of the last three high-severity findings have been self-inflicted, which is
+worth stating plainly: the passes are catching my own changes as much as the original
+code. Pass 7 follows.
