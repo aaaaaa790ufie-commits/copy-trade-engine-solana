@@ -29,17 +29,24 @@ SECRET_KEYS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "SEED", "MNEMONIC")
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
-    """Minimal dotenv parser: KEY=VALUE, `export ` prefix and quotes tolerated.
+    """Minimal dotenv parser: KEY=VALUE, `export ` prefix, quotes, multi-line values.
 
-    Follows the usual dotenv convention that a trailing ` #` comment is stripped from an
-    unquoted value but kept inside quotes — `POLL=15  # fast` is 15, while a token
-    containing a hash is preserved as long as it is quoted.
+    A trailing ` #` comment is stripped from an unquoted value but kept inside quotes,
+    per the usual dotenv convention — `POLL=15  # fast` is 15, while a token containing
+    a hash survives as long as it is quoted.
+
+    Quoted values may span lines. `gmgn-cli config --apply` writes GMGN_PRIVATE_KEY as a
+    PEM block, and reading only the first physical line silently truncated it to
+    `"-----BEGIN PRIVATE KEY-----` — a corrupt credential that still looked plausible.
     """
     out: dict[str, str] = {}
     if not path.is_file():
         return out
-    for raw in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
-        line = raw.strip()
+    lines = path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        i += 1
         if not line or line.startswith("#") or "=" not in line:
             continue
         if line.startswith("export "):
@@ -49,8 +56,23 @@ def _parse_env_file(path: Path) -> dict[str, str]:
         if not key:
             continue
         value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-            value = value[1:-1]
+        quote = value[0] if value[:1] in ("'", '"') else ""
+        if quote:
+            if len(value) >= 2 and value[-1] == quote:
+                value = value[1:-1]
+            else:
+                # Opening quote with no closing one: keep taking raw lines until it closes.
+                parts = [value[1:]]
+                while i < len(lines):
+                    nxt = lines[i]
+                    i += 1
+                    if nxt.rstrip().endswith(quote):
+                        parts.append(nxt.rstrip()[:-1])
+                        break
+                    parts.append(nxt)
+                else:
+                    print(f"warning: {path}: unterminated quote for {key}", file=sys.stderr)
+                value = "\n".join(parts)
         else:
             value = value.split(" #", 1)[0].split("\t#", 1)[0].strip()
         out[key] = value
@@ -128,15 +150,6 @@ def mask(value: str) -> str:
     return f"{value[:4]}...({len(value)} chars)"
 
 
-def apply_to_environ() -> None:
-    """Export the repo `.env` into os.environ for modules that still read it directly.
-
-    Existing process values are preserved so an explicit override always wins.
-    """
-    for key, value in FILE_ENV.items():
-        os.environ.setdefault(key, value)
-
-
 # --------------------------------------------------------------------------
 # GMGN API credentials
 # --------------------------------------------------------------------------
@@ -156,8 +169,31 @@ def gmgn_env() -> dict[str, str]:
     return env
 
 
-def gmgn_credentials_present() -> bool:
-    return bool(get("GMGN_API_KEY"))
+def _drop_keys(lines: list[str], keys: set[str]) -> list[str]:
+    """Remove the given assignments, including the continuation lines of quoted blocks.
+
+    Filtering line by line on the key name would leave the body of a multi-line PEM
+    behind as orphaned text, which then parses as garbage on the next read.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip().removeprefix("export ").lstrip()
+        key, sep, value = stripped.partition("=")
+        i += 1
+        if not sep or key.strip() not in keys:
+            out.append(line)
+            continue
+        value = value.strip()
+        quote = value[0] if value[:1] in ("'", '"') else ""
+        if quote and not (len(value) >= 2 and value[-1] == quote):
+            while i < len(lines):  # skip the rest of the quoted block
+                if lines[i].rstrip().endswith(quote):
+                    i += 1
+                    break
+                i += 1
+    return out
 
 
 def import_gmgn_credentials() -> int:
@@ -176,7 +212,7 @@ def import_gmgn_credentials() -> int:
         print("local .env already holds these GMGN credentials")
         return 0
     lines = ENV_PATH.read_text(encoding="utf-8-sig", errors="replace").splitlines() if ENV_PATH.is_file() else []
-    kept = [ln for ln in lines if ln.split("=", 1)[0].strip().removeprefix("export ").strip() not in added]
+    kept = _drop_keys(lines, set(added))
     if kept and kept[-1].strip():
         kept.append("")
     kept.append("# GMGN API credentials (imported from machine-wide gmgn-cli config)")
@@ -224,8 +260,12 @@ STATS_TTL = get_int("GMGN_STATS_TTL_SECONDS", 3600)
 
 
 def summary() -> str:
-    """Human-readable config dump with every credential masked."""
-    rows = [
+    """Human-readable config dump. Anything is_secret() says is a credential is masked.
+
+    Masking is driven by the key name rather than a hand-written list, so adding a
+    credential to this dump cannot accidentally print it in full.
+    """
+    settings = [
         ("env file", str(ENV_PATH) + ("" if ENV_PATH.is_file() else "  (MISSING)")),
         ("database", DB_PATH),
         ("chains", ",".join(CHAINS)),
@@ -234,13 +274,14 @@ def summary() -> str:
         ("stake SOL", STAKE_SOL),
         ("hard stop %", HARD_STOP_PCT),
         ("trailing %", f"activate {TRAILING_ACTIVATE_PCT} / distance {TRAILING_DISTANCE_PCT}"),
-        ("TELEGRAM_BOT_TOKEN", mask(TELEGRAM_BOT_TOKEN)),
-        ("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID or "(unset)"),
-        ("GMGN_API_KEY", mask(get("GMGN_API_KEY"))),
         ("web app", f"http://{WEBAPP_HOST}:{WEBAPP_PORT}"),
         ("web app public", WEBAPP_PUBLIC_URL or "(unset - Telegram button disabled)"),
     ]
-    return "\n".join(f"{k:22} {v}" for k, v in rows)
+    credentials = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", *GMGN_CRED_KEYS]
+    for key in credentials:
+        value = get(key)
+        settings.append((key, mask(value) if is_secret(key) else (value or "(unset)")))
+    return "\n".join(f"{k:22} {v}" for k, v in settings)
 
 
 def main() -> None:

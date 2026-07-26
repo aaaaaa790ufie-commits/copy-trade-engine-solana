@@ -211,6 +211,36 @@ class WalletEligibilityTests(unittest.TestCase):
         self.assertIsNone(c.execute("SELECT 1 FROM wallet_watch WHERE address='loser'").fetchone())
         self.assertTrue(pe.is_blacklisted(c, "loser", "sol"))
 
+    def test_unusable_response_still_advances_the_queue(self):
+        # A row the API answers for but with no usable win rate matched neither branch,
+        # so updated_at never moved. The refresh query orders by updated_at, so such a
+        # wallet sat at the head of the queue forever, re-queried every pass and
+        # crowding out wallets that would actually yield something. Manual seeds are
+        # the worst case: cleanup_wallets never drops them.
+        c = fresh_db()
+        c.execute("INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) "
+                  "VALUES(?,?,?,?,?,?)", (WALLET_A, "sol", "manual_seed", 0, 0.0, 0))
+        self._refresh(c, {WALLET_A: {"winrate": 0, "buy": 0, "sell": 0}})
+
+        updated = c.execute("SELECT updated_at FROM wallet_watch WHERE address=?",
+                            (WALLET_A,)).fetchone()[0]
+        self.assertEqual(updated, NOW, "the row must move to the back of the queue")
+        self.assertEqual(
+            c.execute("SELECT winrate FROM wallet_watch WHERE address=?", (WALLET_A,)).fetchone()[0],
+            0.0, "but nothing may be invented about it")
+
+    def test_malformed_address_in_a_stats_response_is_dropped(self):
+        calls = []
+        pe.cli = lambda args: calls.append(args) or [
+            {"address": "<script>alert(1)</script>", "winrate": 0.9},
+            {"address": WALLET_A, "winrate": 0.8},
+        ]
+        try:
+            got = pe.get_stats("sol", [WALLET_A, WALLET_B], max_batches=1)
+        finally:
+            pe.cli = pe.gmgn_cli
+        self.assertEqual(set(got), {WALLET_A})
+
     def test_wallet_that_resumes_trading_is_reactivated(self):
         c = fresh_db()
         self._seed(c, "returner", 0.72)
@@ -1177,6 +1207,30 @@ class ConfigParsingTests(unittest.TestCase):
         # which get_int() then silently discarded in favour of the default.
         got = self._parse("GMGN_POLL_SECONDS=15  # fast\n")
         self.assertEqual(got["GMGN_POLL_SECONDS"], "15")
+
+    def test_multiline_quoted_value_survives(self):
+        # gmgn-cli writes GMGN_PRIVATE_KEY as a PEM block. Reading only the first
+        # physical line truncated it to `"-----BEGIN PRIVATE KEY-----` — a corrupt
+        # credential that still looked plausible, and --import-gmgn copied that
+        # truncation into the project .env.
+        pem = '-----BEGIN PRIVATE KEY-----\nMIIBVgIBADANBg\nkqhkiG9w0BAQ==\n-----END PRIVATE KEY-----'
+        got = self._parse(f'A=1\nGMGN_PRIVATE_KEY="{pem}"\nB=2\n')
+        self.assertEqual(got["GMGN_PRIVATE_KEY"], pem)
+        self.assertEqual(got["A"], "1")
+        self.assertEqual(got["B"], "2", "parsing must resume after the block")
+
+    def test_unterminated_quote_does_not_swallow_the_file(self):
+        got = self._parse('A=1\nBROKEN="never closed\nB=2\n')
+        self.assertEqual(got["A"], "1")
+        self.assertIn("BROKEN", got)
+
+    def test_multiline_value_round_trips_through_drop_keys(self):
+        pem = '-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----'
+        lines = ["# header", "KEEP=yes", f'GMGN_PRIVATE_KEY="{pem}"'.split("\n")[0]]
+        lines += pem.split("\n")[1:-1] + [pem.split("\n")[-1] + '"', "TRAILING=ok"]
+        kept = config._drop_keys(lines, {"GMGN_PRIVATE_KEY"})
+        self.assertEqual(kept, ["# header", "KEEP=yes", "TRAILING=ok"],
+                         "the block body must go with its key, not linger as garbage")
 
     def test_hash_inside_a_quoted_value_is_preserved(self):
         got = self._parse('TOKEN="abc#def"\n')

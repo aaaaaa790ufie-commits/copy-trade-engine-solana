@@ -5,7 +5,7 @@ from collections import defaultdict
 import config
 LOG=logging.getLogger("paper-engine")
 # All tunables and credentials come from the repo-local .env via config.py.
-DB=config.DB_PATH; BUDGET=config.BUDGET_SOL; STAKE=config.STAKE_SOL; WINDOW=config.CLUSTER_WINDOW; COOLDOWN=config.COOLDOWN_SECONDS; POLL=config.POLL_SECONDS; ENTRY=config.ENTRY_SCORE; TRAIL_ACT=config.TRAILING_ACTIVATE_PCT/100; TRAIL_DIST=config.TRAILING_DISTANCE_PCT/100; HARD=config.HARD_STOP_PCT/100; LIMIT=config.FEED_LIMIT; CHAINS=config.CHAINS
+DB=config.DB_PATH; STAKE=config.STAKE_SOL; WINDOW=config.CLUSTER_WINDOW; COOLDOWN=config.COOLDOWN_SECONDS; POLL=config.POLL_SECONDS; ENTRY=config.ENTRY_SCORE; TRAIL_ACT=config.TRAILING_ACTIVATE_PCT/100; TRAIL_DIST=config.TRAILING_DISTANCE_PCT/100; HARD=config.HARD_STOP_PCT/100; LIMIT=config.FEED_LIMIT; CHAINS=config.CHAINS
 MAX_HOLD=config.MAX_HOLD_SECONDS; ZERO_TTL=config.ZERO_WINRATE_TTL; PRICE_TTL=config.PRICE_TTL
 def _find_gmgn():
     """Resolve the gmgn-cli entrypoint. On Windows CreateProcess needs the .cmd shim
@@ -147,8 +147,11 @@ def get_stats(chain,wallets,max_batches=0):
   try: got=list_rows(cli(["portfolio","stats","--chain",chain,"--wallet",*b,"--period","30d"]))
   except Exception as e: LOG.warning("stats %s: %s",chain,e); continue
   for r in got:
-   a=str(r.get("address") or r.get("wallet") or r.get("wallet_address") or r.get("maker") or "")
+   # Validated here too: learn_new_makers inserts straight from these keys, so an
+   # unchecked one would put junk in wallet_watch and from there into the panel.
+   a=_addr(r,"address","wallet","wallet_address","maker")
    if a: out[a]=r
+  # A single-wallet batch sometimes comes back without the address echoed; attribute it.
   if len(b)==1 and b[0] not in out and len(got)==1: out[b[0]]=got[0]
   time.sleep(0.25)
  return out
@@ -176,6 +179,12 @@ def refresh_wallet_stats(c,chain,now):
    else: c.execute("UPDATE wallet_watch SET winrate=?,active=1,updated_at=? WHERE address=? AND chain=?",(wrv,now,w,chain))
    upd+=1
    if wrv>=.70 and old and old[0]<.70: new_high.append((w[:8],wrv))
+  else:
+   # The API answered but gave us nothing usable. Without touching updated_at the row
+   # stays at the head of the ORDER BY updated_at queue forever, and re-queries the
+   # same dead weight every pass — manual seeds especially, since cleanup never drops
+   # them. Move it to the back instead; winrate and active are left alone.
+   c.execute("UPDATE wallet_watch SET updated_at=? WHERE address=? AND chain=?",(now,w,chain))
  if upd:
   LOG.info("refreshed stats for %d/%d stale wallets on %s",upd,len(addrs),chain)
   if new_high: emit(c,"WALLET",f"{chain} | NEW high-winrate: {len(new_high)} wallet(s) >=70%, ex: {new_high[0][0]}... {new_high[0][1]*100:.0f}%")
