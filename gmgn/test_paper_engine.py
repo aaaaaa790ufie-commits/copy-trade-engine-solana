@@ -1598,6 +1598,89 @@ class AuthDefaultTests(unittest.TestCase):
         )
 
 
+class ResetAccountTests(unittest.TestCase):
+    """The script that settles positions and tops the account up. It writes to the
+    operator's real account, so its behaviour is pinned rather than trusted."""
+
+    def setUp(self):
+        import reset_account
+        self.reset = reset_account
+        self._token_price = pe.token_price
+
+    def tearDown(self):
+        pe.token_price = self._token_price
+
+    def _open(self, c, mint, entry=1.0, peak=1.0, stake=0.025):
+        c.execute("INSERT INTO paper_positions VALUES(?,'sol',?,?,?,?,1.0,2,'open')",
+                  (mint, entry, peak, stake, NOW))
+
+    def test_dry_run_writes_nothing(self):
+        c = fresh_db()
+        self._open(c, MINT_A)
+        pe.token_price = lambda ch, m: 0.5
+        before = c.execute("SELECT budget_sol FROM paper_account WHERE id=1").fetchone()[0]
+
+        closed, pnl = self.reset.close_all(c, NOW, apply=False)
+
+        self.assertEqual(closed, 1, "the preview still reports what it would do")
+        self.assertAlmostEqual(pnl, 0.025 * -0.5)
+        self.assertEqual(c.execute("SELECT budget_sol FROM paper_account WHERE id=1").fetchone()[0], before)
+        self.assertEqual(
+            c.execute("SELECT status FROM paper_positions WHERE token_mint=?", (MINT_A,)).fetchone()[0],
+            "open")
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM paper_trades").fetchone()[0], 0)
+
+    def test_settles_at_the_market_and_keeps_the_books(self):
+        c = fresh_db()
+        self._open(c, MINT_A)
+        c.execute("UPDATE paper_account SET budget_sol=0.075")   # one stake is out
+        pe.token_price = lambda ch, m: 0.5                       # -50%
+
+        self.reset.close_all(c, NOW, apply=True)
+
+        bal, initial = c.execute(
+            "SELECT budget_sol,initial_budget_sol FROM paper_account WHERE id=1").fetchone()
+        realised = c.execute(
+            "SELECT COALESCE(SUM(pnl_sol),0) FROM paper_trades WHERE action='EXIT'").fetchone()[0]
+        self.assertAlmostEqual(realised, -0.0125)
+        self.assertAlmostEqual(bal, 0.075 + 0.025 - 0.0125)
+        self.assertAlmostEqual(bal, initial + realised, msg="money must stay conserved")
+
+    def test_a_cooldown_is_set_like_every_other_exit(self):
+        # Without it the engine could re-buy the token it just settled on the next poll,
+        # while the triggering buy is still inside the cluster window.
+        c = fresh_db()
+        self._open(c, MINT_A)
+        pe.token_price = lambda ch, m: 0.5
+        self.reset.close_all(c, NOW, apply=True)
+
+        self.assertTrue(pe.cooling(c, MINT_A, "sol", NOW))
+        self.assertFalse(pe.cooling(c, MINT_A, "sol", NOW + pe.COOLDOWN + 1))
+
+    def test_an_unpriceable_position_settles_at_its_last_mark(self):
+        c = fresh_db()
+        self._open(c, MINT_A, entry=1.0, peak=1.4)
+        pe.token_price = lambda ch, m: 0.0        # delisted
+
+        self.reset.close_all(c, NOW, apply=True)
+
+        price, reason = c.execute(
+            "SELECT price,reason FROM paper_trades WHERE action='EXIT'").fetchone()
+        self.assertAlmostEqual(price, 1.4, msg="settled at the last mark, not invented as zero")
+        self.assertIn("no quote", reason, "and the journal says so")
+
+    def test_a_zero_entry_price_does_not_divide(self):
+        c = fresh_db()
+        self._open(c, MINT_A, entry=0.0)
+        pe.token_price = lambda ch, m: 1.0
+        closed, pnl = self.reset.close_all(c, NOW, apply=True)
+        self.assertEqual(closed, 1)
+        self.assertEqual(pnl, 0.0)
+
+    def test_nothing_open_is_not_an_error(self):
+        self.assertEqual(self.reset.close_all(fresh_db(), NOW, apply=True), (0, 0.0))
+
+
 class OperatorFacingLabelTests(unittest.TestCase):
     """Numbers shown to the operator must describe the threshold actually applied.
 

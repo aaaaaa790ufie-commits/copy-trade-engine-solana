@@ -59,6 +59,12 @@ def close_all(c: sqlite3.Connection, now: int, apply: bool) -> tuple[int, float]
         c.execute("UPDATE paper_account SET budget_sol=budget_sol+?,updated_at=? WHERE id=1",
                   (stake + pnl, now))
         c.execute("UPDATE paper_positions SET status='closed' WHERE token_mint=?", (mint,))
+        # Same cooldown every other exit takes. Without it the engine could re-buy the
+        # token it just settled on its very next poll, while the buy that triggered the
+        # original entry is still inside the cluster window.
+        c.execute("INSERT INTO paper_cooldowns VALUES(?,?,?) "
+                  "ON CONFLICT(token_mint,chain) DO UPDATE SET until_ts=excluded.until_ts",
+                  (mint, chain, now + pe.COOLDOWN))
         c.execute(
             "INSERT INTO paper_trades(token_mint,chain,action,price,stake_sol,pnl_sol,pnl_pct,"
             "reason,wallet_count,signal_score,event_ts) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
