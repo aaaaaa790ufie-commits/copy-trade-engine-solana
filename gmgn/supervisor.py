@@ -39,6 +39,9 @@ class Child:
         self.proc: subprocess.Popen | None = None
         self.backoff = MIN_BACKOFF
         self.restarts = 0
+        # Set when we stop the child deliberately (e.g. a new public URL), so its exit
+        # is not counted as a crash and does not inflate the restart backoff.
+        self.expected_exit = False
 
     def start(self) -> None:
         LOG.info("starting %s", self.name)
@@ -59,7 +62,10 @@ class Child:
         for line in proc.stdout:
             print(f"[{self.name}] {line.rstrip()}", flush=True)
 
-    def stop(self) -> None:
+    def stop(self, expected: bool = False) -> None:
+        """Terminate the child. `expected` marks a restart we asked for, so the
+        supervise loop reports it as such instead of as a crash."""
+        self.expected_exit = expected
         if not self.proc or self.proc.poll() is not None:
             return
         LOG.info("stopping %s", self.name)
@@ -68,6 +74,10 @@ class Child:
             self.proc.wait(timeout=10)
         except Exception:
             self.proc.kill()
+            try:
+                self.proc.wait(timeout=5)  # reap it; without this it lingers as a zombie
+            except Exception:
+                LOG.warning("%s did not exit after kill", self.name)
 
 
 def supervise(children: list[Child]) -> None:
@@ -80,9 +90,15 @@ def supervise(children: list[Child]) -> None:
     def shutdown(*_):
         stopping.set()
 
-    signal.signal(signal.SIGINT, shutdown)
-    if hasattr(signal, "SIGTERM"):
-        signal.signal(signal.SIGTERM, shutdown)
+    # Signal handlers can only be installed from the main thread; installing them is a
+    # convenience for the CLI, not a requirement of the loop, so a non-main-thread caller
+    # gets the same supervision without Ctrl+C handling rather than a ValueError.
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGINT, shutdown)
+        if hasattr(signal, "SIGTERM"):
+            signal.signal(signal.SIGTERM, shutdown)
+    else:
+        LOG.debug("not on the main thread — signal handlers not installed")
 
     try:
         while not stopping.is_set():
@@ -91,6 +107,13 @@ def supervise(children: list[Child]) -> None:
                     continue
                 code = child.proc.returncode
                 uptime = time.time() - started[child.name]
+                if child.expected_exit:
+                    # We asked for this one; restart immediately and leave backoff alone.
+                    child.expected_exit = False
+                    LOG.info("restarting %s as requested", child.name)
+                    started[child.name] = time.time()
+                    child.start()
+                    continue
                 if uptime >= HEALTHY_AFTER:
                     child.backoff = MIN_BACKOFF
                 child.restarts += 1
@@ -138,7 +161,7 @@ def main() -> None:
         for child in children:
             if child.name in ("bot", "webapp") and child.proc and child.proc.poll() is None:
                 LOG.info("restarting %s for the new public URL", child.name)
-                child.stop()  # the supervise loop notices the exit and restarts it
+                child.stop(expected=True)  # the supervise loop notices the exit and restarts it
 
     if args.tunnel and not args.no_webapp:
         from tunnel import Tunnel

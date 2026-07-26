@@ -725,6 +725,76 @@ class WebappPositionTests(unittest.TestCase):
         self.assertEqual(merged["a"], 5.0, "one bad poll must not blank the position")
 
 
+class ConfigParsingTests(unittest.TestCase):
+    """.env is the single source of truth for credentials and tunables."""
+
+    def _parse(self, text):
+        fd, path = tempfile.mkstemp(suffix=".env")
+        os.close(fd)
+        try:
+            pathlib.Path(path).write_text(text, encoding="utf-8")
+            return config._parse_env_file(pathlib.Path(path))
+        finally:
+            os.unlink(path)
+
+    def test_basic_forms(self):
+        got = self._parse('A=1\nB="two"\nC=\'three\'\nexport D=4\n')
+        self.assertEqual(got, {"A": "1", "B": "two", "C": "three", "D": "4"})
+
+    def test_comments_and_blanks_are_skipped(self):
+        self.assertEqual(self._parse("# note\n\n   \nA=1\n"), {"A": "1"})
+
+    def test_trailing_comment_is_stripped_from_an_unquoted_value(self):
+        # `GMGN_POLL_SECONDS=15  # fast` used to parse as the string "15  # fast",
+        # which get_int() then silently discarded in favour of the default.
+        got = self._parse("GMGN_POLL_SECONDS=15  # fast\n")
+        self.assertEqual(got["GMGN_POLL_SECONDS"], "15")
+
+    def test_hash_inside_a_quoted_value_is_preserved(self):
+        got = self._parse('TOKEN="abc#def"\n')
+        self.assertEqual(got["TOKEN"], "abc#def")
+
+    def test_value_may_contain_equals(self):
+        got = self._parse("URL=https://x/y?a=b\n")
+        self.assertEqual(got["URL"], "https://x/y?a=b")
+
+    def test_missing_file_is_empty_not_an_error(self):
+        self.assertEqual(config._parse_env_file(pathlib.Path("no-such-file.env")), {})
+
+    def test_typed_getters_fall_back_on_junk(self):
+        self.assertEqual(config.get_int("SENTINEL_NOT_A_REAL_KEY", 7), 7)
+        self.assertEqual(config.get_float("SENTINEL_NOT_A_REAL_KEY", 1.5), 1.5)
+        self.assertFalse(config.get_bool("SENTINEL_NOT_A_REAL_KEY"))
+        os.environ["SENTINEL_JUNK_INT"] = "banana"
+        try:
+            self.assertEqual(config.get_int("SENTINEL_JUNK_INT", 7), 7)
+        finally:
+            del os.environ["SENTINEL_JUNK_INT"]
+
+    def test_process_environment_wins_over_the_file(self):
+        os.environ["SENTINEL_OVERRIDE_CHECK"] = "from-env"
+        try:
+            config.FILE_ENV["SENTINEL_OVERRIDE_CHECK"] = "from-file"
+            self.assertEqual(config.get("SENTINEL_OVERRIDE_CHECK"), "from-env")
+        finally:
+            del os.environ["SENTINEL_OVERRIDE_CHECK"]
+            config.FILE_ENV.pop("SENTINEL_OVERRIDE_CHECK", None)
+
+    def test_secrets_are_masked_never_echoed(self):
+        self.assertNotIn("SUPERSECRETVALUE", config.mask("SUPERSECRETVALUE"))
+        self.assertEqual(config.mask(""), "(unset)")
+        self.assertTrue(config.is_secret("TELEGRAM_BOT_TOKEN"))
+        self.assertTrue(config.is_secret("GMGN_PRIVATE_KEY"))
+        self.assertFalse(config.is_secret("GMGN_POLL_SECONDS"))
+
+    def test_summary_leaks_no_credential(self):
+        out = config.summary()
+        for key in ("TELEGRAM_BOT_TOKEN", "GMGN_API_KEY", "GMGN_PRIVATE_KEY"):
+            value = config.get(key)
+            if value:
+                self.assertNotIn(value, out, f"{key} must never appear in full")
+
+
 class BotPushTests(unittest.TestCase):
     """Events must not be dropped by a restart, nor replayed in full after an outage."""
 

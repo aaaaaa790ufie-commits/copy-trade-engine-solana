@@ -252,3 +252,80 @@ Requires (in order):
 4. **No Jupiter fallback**: configured in config.toml but no code exists.
 5. **Phase 6,7,8 build on each other**: Executor → Position Mgr → Live-Submit
    must be built sequentially due to dependency chain.
+
+---
+
+# Hardening passes (`gmgn/` module)
+
+Scope: `gmgn/` in full. Out of scope: the Rust crates (`ingest/`, `executor/`,
+`filter/`, `risk/`, `scorer/`, `position_mgr/`, `telemetry/`), `target/`, `.venv/`.
+Off-limits without approval: the paper-only nature of the engine, the contents of
+`sentinel.db`, and the risk-parameter defaults.
+
+## Pass 1 — 2026-07-26
+
+Read end to end: `paper_engine.py`, `webapp.py`, `telegram_bot.py`, `config.py`,
+`supervisor.py`, `tunnel.py`, `webapp/index.html`.
+
+### Found and fixed
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 1 | High | Re-entering a token traded before raised `IntegrityError` on the `token_mint` primary key, killed the process, and the supervisor restarted into the same still-live signal — a crash loop with no stop-loss coverage | `enter()` reopens the row via `ON CONFLICT DO UPDATE`; history stays in `paper_trades` | `6771f93` |
+| 2 | High | Any transient error out of `cycle()` terminated the poll loop | `run_forever()` rolls back, journals an `ERROR` event, retries; escalates only after `GMGN_MAX_CYCLE_FAILURES` | `6771f93` |
+| 3 | High | `refresh_wallet_stats` rewrote a dormant wallet's win rate to a synthetic `0.49` so `cleanup_wallets` would permanently blacklist it — an 80% wallet banned for not buying recently, contradicting that function's own docstring | Ineligible wallets are parked with `active=0`, keep their real win rate, and are reactivated when they trade again | `a2d7e16` |
+| 4 | High | Mints and wallet addresses from the GMGN API were stored raw and interpolated into the Mini App's HTML — stored XSS in a panel served over a public tunnel | Escaping moved inside `short()`; engine rejects non-base58 at the feed boundary | `714cafa` |
+| 5 | High | An unpriced position was displayed at `peak_price`, the best price ever seen — a rugged token showed `+200%` | Valued at cost, with `priced: false` | `c44fe6a` |
+| 6 | High | The bot reset its cursor to `MAX(id)` on start, silently dropping every event raised while it was down, including `BANKRUPT` and `EXIT` | Cursor persisted to `bot_state.json`; long outages summarised | `885e560` |
+| 7 | Medium | `exits()` raised `ZeroDivisionError` on a zero entry price, aborting the sweep for every later position in the chain | Row skipped with an error log | `ea43add` |
+| 8 | Medium | A delisted token's position never closes, locking its stake | `STUCK` event, throttled; valuation deferred to the operator (ISSUES.md #4) | `ea43add` |
+| 9 | Medium | `token_price` could return a negative mark straight into the P&L calculation | Treated as unavailable | `ea43add` |
+| 10 | Medium | `_price_cache` and the webapp's `_prices` grew unbounded | Both bounded; `merge_marks()` rebuilds from open positions | `ea43add`, `c44fe6a` |
+| 11 | Medium | Elite buy call-outs only fired for makers seen for the first time, so a known 90% wallet never triggered one | Eligibility from `wallet_watch`; bounded by heartbeat, window and a per-cycle cap | `1d61602` |
+| 12 | Medium | A failed `sendMessage` advanced the bot's cursor past the undelivered event | Cursor holds; event retried | `885e560` |
+| 13 | Medium | The bot opened the database read-write, and a wrong path silently created an empty one | `mode=ro`, refuses to start if missing | `885e560` |
+| 14 | Medium | The price refresher leaked a connection whenever its query raised | `try/finally` | `c44fe6a` |
+| 15 | Medium | `_prices` was cleared then repopulated under the lock, so readers saw an empty dict mid-swap | Atomic rebind | `c44fe6a` |
+| 16 | Medium | `.env` values kept their trailing `# comment`, so `POLL=15 # fast` silently fell back to the default | Stripped for unquoted values, preserved inside quotes | this pass |
+| 17 | Medium | `enter()` and `save_token_scores()` duplicated the cluster computation, so `/weights` could drift from the entry decision | Unified in `cluster()`/`score_of()` | `ea43add` |
+| 18 | Low | `supervise()` logged a deliberate restart as a crash and inflated its backoff | `stop(expected=True)` | this pass |
+| 19 | Low | `supervise()` raised `ValueError` if called off the main thread | Signal handlers installed conditionally | this pass |
+| 20 | Low | Bare `except: pass` around price parsing swallowed `KeyboardInterrupt` | Narrowed to `(TypeError, ValueError)` | `ea43add` |
+| 21 | Low | `Child.stop()` never reaped a killed process | `wait()` after `kill()` | this pass |
+
+### Verification
+
+```
+$ python -m unittest test_paper_engine
+Ran 74 tests in 2.609s
+OK
+```
+
+Tests went from 19 to 74. Beyond the new coverage, tightening address validation
+exposed that several **existing** tests used placeholder addresses (`"MINTX"`,
+`"w1"`): four failed outright, and others would have started passing vacuously,
+since `cluster()` returns a `defaultdict` and an empty result still satisfied
+`score == 0`. All fixtures now use real base58 addresses and assert presence
+before asserting values.
+
+Live checks, not inferred:
+
+- One real cycle against the GMGN API: `[cycle] 4.4s wallets=1206 open=0`, no errors.
+- `/api/overview` and `/api/health` both 200 against the real database.
+- Supervisor restart semantics driven directly: an expected restart logged
+  `restarting bot as requested` with `restarts=0, backoff=3s`; a killed child
+  logged `exited with code 1 — restart #1` with backoff growing 3s → 6s.
+- UI escaping verified by extracting `esc()`/`short()` from the page and running
+  them under node against an `<img onerror>` payload.
+
+### Still open
+
+Four items are in `ISSUES.md` — they are real, but each changes trading
+behaviour, mutates existing data, or needs a judgement that is the operator's:
+the 5551 wrongly-blacklisted wallets (remediation script written, not run), the
+strategy's unprofitability at `ENTRY_SCORE=0.25`, unbounded table growth, and how
+to value a delisted position.
+
+**Confidence that `gmgn/` is production-ready: medium.** The crash paths that
+cost real money are fixed and pinned by tests, but this is one pass, and passes 2+
+have not yet run.

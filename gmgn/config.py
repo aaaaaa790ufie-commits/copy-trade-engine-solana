@@ -29,7 +29,12 @@ SECRET_KEYS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "SEED", "MNEMONIC")
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
-    """Minimal dotenv parser: KEY=VALUE, `export ` prefix and quotes tolerated."""
+    """Minimal dotenv parser: KEY=VALUE, `export ` prefix and quotes tolerated.
+
+    Follows the usual dotenv convention that a trailing ` #` comment is stripped from an
+    unquoted value but kept inside quotes — `POLL=15  # fast` is 15, while a token
+    containing a hash is preserved as long as it is quoted.
+    """
     out: dict[str, str] = {}
     if not path.is_file():
         return out
@@ -46,6 +51,8 @@ def _parse_env_file(path: Path) -> dict[str, str]:
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
             value = value[1:-1]
+        else:
+            value = value.split(" #", 1)[0].split("\t#", 1)[0].strip()
         out[key] = value
     return out
 
