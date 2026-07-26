@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
 import paper_engine as pe  # noqa: E402
+import webapp  # noqa: E402  (shared metric computation, so the two surfaces agree)
 
 LOG = logging.getLogger("telegram-bot")
 DB = config.DB_PATH
@@ -227,23 +228,56 @@ def text(c: sqlite3.Connection, command: str) -> str:
             "SELECT token_mint,chain,stake_sol,entry_price,peak_price,opened_at,signal_score "
             "FROM paper_positions WHERE status='open' ORDER BY opened_at DESC"
         ).fetchall()
-        realized = c.execute("SELECT COALESCE(SUM(pnl_sol),0) FROM paper_trades WHERE action='EXIT'").fetchone()[0]
         last_cycle = pe.last_cycle_ts(c)
         age = int(time.time()) - last_cycle if last_cycle else None
         alive = pe.engine_is_alive(last_cycle)
-        out = [
-            f"{'💀 БАНКРОТ' if bankrupt else '🟢 LIVE' if alive else '🔴 ДВИЖОК СТОИТ'}",
-            f"Баланс: {balance:.5f} SOL  (вложено {initial:.5f})",
-            f"Реализовано всего: {realized:+.5f} SOL",
-        ]
-        # Lifetime P&L still carries whatever the previous configuration did, so report
-        # the current settings separately once the account has been reset.
+
+        # Every figure leads with what the settings in force have done, and carries the
+        # lifetime number — which still includes whatever earlier configurations did — in
+        # parentheses. Before any reset there is only one period, so nothing is bracketed.
         reset_at = pe.reset_ts(c)
+        lifetime = webapp.performance(c, 0)
+        current = webapp.performance(c, reset_at) if reset_at else lifetime
+
+        def both(fmt) -> str:
+            """Current period, then the lifetime figure in parentheses."""
+            shown = fmt(current)
+            return shown + " (" + fmt(lifetime) + ")" if reset_at else shown
+
+        def money(s):
+            return "{:+.5f} SOL".format(s["realized_sol"])
+
+        def counted(s):
+            return str(s["closed"])
+
+        def win_loss(s):
+            return "{} / {}".format(s["wins"], s["losses"])
+
+        def winrate(s):
+            return "{:.0f}%".format(s["winrate_pct"]) if s["closed"] else "—"
+
+        def best(s):
+            return "{:+.2f}%".format(s["best_pct"]) if s["closed"] else "—"
+
+        def worst(s):
+            return "{:+.2f}%".format(s["worst_pct"]) if s["closed"] else "—"
+
+        out = [
+            "💀 БАНКРОТ" if bankrupt else "🟢 LIVE" if alive else "🔴 ДВИЖОК СТОИТ",
+            f"Баланс: {balance:.5f} SOL",
+        ]
         if reset_at:
-            since_pnl, since_n = pe.realised_since(c, reset_at)
-            age_h = (int(time.time()) - reset_at) / 3600
-            out.append(f"С текущих настроек ({age_h:.1f} ч): {since_pnl:+.5f} SOL за {_plural(since_n, 'сделку', 'сделки', 'сделок')}")
-        out.append(f"Открыто позиций: {len(pos)}")
+            hours = (int(time.time()) - reset_at) / 3600
+            out.append(f"Метрики за {hours:.1f} ч с пополнения (в скобках — всего):")
+        out += [
+            "P&L: " + both(money),
+            "Сделок: " + both(counted),
+            "W / L: " + both(win_loss),
+            "Винрейт: " + both(winrate),
+            "Лучшая: " + both(best),
+            "Худшая: " + both(worst),
+            f"Открыто позиций: {len(pos)}",
+        ]
         if age is not None:
             out.append(f"Последний цикл: {age} с назад")
         for m, chain, stake, entry, peak, opened, score in pos:

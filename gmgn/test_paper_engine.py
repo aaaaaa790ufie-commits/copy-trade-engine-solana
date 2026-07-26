@@ -1,3 +1,4 @@
+import json
 import os
 import pathlib
 import re
@@ -1595,6 +1596,160 @@ class AuthDefaultTests(unittest.TestCase):
              "/api/events", "/api/equity", "/api/attribution"},
             "a new endpoint must be considered for the auth gate",
         )
+
+
+class PeriodSplitTests(unittest.TestCase):
+    """Headline metrics lead with the current settings; lifetime goes in parentheses."""
+
+    def setUp(self):
+        import webapp
+        self.webapp = webapp
+
+    def _exit(self, c, ts, pnl, pct):
+        c.execute("INSERT INTO paper_trades(token_mint,chain,action,price,stake_sol,pnl_sol,"
+                  "pnl_pct,reason,wallet_count,signal_score,event_ts) "
+                  "VALUES(?,'sol','EXIT',1.0,0.025,?,?,'t',1,1.0,?)", (MINT_A, pnl, pct, ts))
+
+    def _populated(self):
+        c = fresh_db()
+        # Before the reset: two wins, two losses, worst -50%.
+        self._exit(c, NOW - 400, +0.01, 0.20)
+        self._exit(c, NOW - 300, -0.02, -0.50)
+        self._exit(c, NOW - 200, +0.03, 0.40)
+        self._exit(c, NOW - 100, -0.01, -0.10)
+        self._exit(c, NOW, -0.005, -0.20)          # the settlement at reset itself
+        # After: one win.
+        self._exit(c, NOW + 100, +0.004, 0.15)
+        return c
+
+    def test_the_two_periods_are_computed_independently(self):
+        c = self._populated()
+        lifetime = self.webapp.performance(c, 0)
+        current = self.webapp.performance(c, NOW)
+
+        self.assertEqual(lifetime["closed"], 6)
+        self.assertEqual(lifetime["wins"], 3)
+        self.assertEqual(lifetime["losses"], 3)
+        self.assertAlmostEqual(lifetime["worst_pct"], -50.0)
+        self.assertAlmostEqual(lifetime["best_pct"], 40.0)
+
+        self.assertEqual(current["closed"], 1, "the settlement at reset is not a new trade")
+        self.assertEqual(current["wins"], 1)
+        self.assertEqual(current["losses"], 0)
+        self.assertAlmostEqual(current["winrate_pct"], 100.0)
+        self.assertAlmostEqual(current["realized_sol"], 0.004)
+        self.assertAlmostEqual(current["best_pct"], 15.0)
+        self.assertAlmostEqual(current["worst_pct"], 15.0)
+
+    def test_an_empty_period_reports_zero_not_an_error(self):
+        c = self._populated()
+        empty = self.webapp.performance(c, NOW + 10_000)
+        self.assertEqual(empty["closed"], 0)
+        self.assertEqual(empty["winrate_pct"], 0.0)
+        self.assertEqual(empty["best_pct"], 0.0)
+        self.assertEqual(empty["realized_sol"], 0)
+
+    def test_works_without_a_row_factory(self):
+        # The bot shares this function and its connection has no row_factory; reading
+        # columns by name raised TypeError there while the panel was fine.
+        c = self._populated()
+        self.assertIsNone(c.row_factory)
+        self.assertEqual(self.webapp.performance(c, 0)["closed"], 6)
+
+    def test_overview_exposes_both_periods(self):
+        c = self._populated()
+        c.execute("INSERT INTO engine_state(key,value,updated_at) VALUES('reset_at',?,?)",
+                  (str(NOW), NOW))
+        c.row_factory = sqlite3.Row
+        original = self.webapp.db
+        self.webapp.db = lambda: _NonClosing(c)
+        try:
+            d = self.webapp.api_overview()
+        finally:
+            self.webapp.db = original
+
+        self.assertEqual(d["reset_at"], NOW)
+        self.assertEqual(d["current"]["closed"], 1)
+        self.assertEqual(d["lifetime"]["closed"], 6)
+        self.assertIn("current_base_sol", d, "the percentage needs a base for the period")
+
+    def test_before_any_reset_the_periods_are_the_same(self):
+        c = self._populated()
+        c.row_factory = sqlite3.Row
+        original = self.webapp.db
+        self.webapp.db = lambda: _NonClosing(c)
+        try:
+            d = self.webapp.api_overview()
+        finally:
+            self.webapp.db = original
+        self.assertEqual(d["reset_at"], 0)
+        self.assertEqual(d["current"], d["lifetime"], "nothing to bracket without a reset")
+
+
+class EveryEndpointTests(unittest.TestCase):
+    """Call every route for real. No test did, and a 500 shipped because of it.
+
+    api_wallets unpacked WEIGHT_TIERS into exactly three names. That was right for the
+    three tiers of the day and raised ValueError the moment the ladder grew to five —
+    the wallets tab returned HTTP 500 in production while 154 tests passed.
+    """
+
+    def setUp(self):
+        import webapp
+        self.webapp = webapp
+
+    def _with_db(self, conn):
+        conn.row_factory = sqlite3.Row
+        original = self.webapp.db
+        self.webapp.db = lambda: _NonClosing(conn)
+        self.addCleanup(lambda: setattr(self.webapp, "db", original))
+
+    def _populate(self, c):
+        c.executemany(
+            "INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) "
+            "VALUES(?,?,?,?,?,?)",
+            [(mint_n(i), "sol", "gmgn", NOW, wr, NOW)
+             for i, wr in enumerate((0.95, 0.85, 0.75, 0.65, 0.55, 0.0))])
+        c.execute("INSERT INTO paper_positions VALUES(?,'sol',1.0,1.2,0.025,?,1.0,2,'open')",
+                  (MINT_A, NOW))
+        c.execute("INSERT INTO paper_trades(token_mint,chain,action,price,stake_sol,pnl_sol,"
+                  "pnl_pct,reason,wallet_count,signal_score,event_ts) "
+                  "VALUES(?,'sol','EXIT',1.0,0.025,0.005,0.2,'t',1,1.0,?)", (MINT_B, NOW))
+        c.execute("INSERT INTO token_scores VALUES('sol',?,0.5,1,1,?)", (MINT_C, NOW))
+        c.execute("INSERT INTO engine_events VALUES(NULL,?,'ENTRY','x')", (NOW,))
+
+    def test_every_route_answers_on_a_populated_database(self):
+        c = fresh_db()
+        self._populate(c)
+        self._with_db(c)
+        for path, handler in sorted(self.webapp.ROUTES.items()):
+            with self.subTest(path):
+                payload = handler({})
+                self.assertIsInstance(payload, dict, f"{path} returned no object")
+                json.dumps(payload)  # must be serialisable, since that is what is sent
+
+    def test_every_route_answers_on_an_empty_database(self):
+        c = fresh_db()
+        self._with_db(c)
+        for path, handler in sorted(self.webapp.ROUTES.items()):
+            with self.subTest(path):
+                json.dumps(handler({}))
+
+    def test_bands_survive_a_change_to_the_weight_ladder(self):
+        saved = pe.WEIGHT_TIERS
+        try:
+            for tiers in (((0.70, 1.0),),
+                          ((0.90, 1.0), (0.80, 0.5), (0.70, 0.25)),
+                          ((0.95, 2.0), (0.9, 1.0), (0.8, 0.5), (0.7, 0.25), (0.6, 0.1), (0.5, 0.05))):
+                with self.subTest(tiers=len(tiers)):
+                    pe.WEIGHT_TIERS = tiers
+                    c = fresh_db()
+                    self._populate(c)
+                    bands = self.webapp.winrate_bands(c)
+                    self.assertEqual(len(bands), len(tiers) + 1, "one band per tier, plus unscored")
+                    self.assertEqual(bands[-1]["label"], "не оценены")
+        finally:
+            pe.WEIGHT_TIERS = saved
 
 
 class StaticFileTests(unittest.TestCase):

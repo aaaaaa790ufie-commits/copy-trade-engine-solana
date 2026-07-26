@@ -205,6 +205,32 @@ def _positions(c: sqlite3.Connection) -> list[dict]:
     return out
 
 
+def performance(c: sqlite3.Connection, since: int = 0) -> dict:
+    """Trade statistics over exits strictly after `since`; `since=0` means lifetime.
+
+    Every headline figure is computed here so the two periods cannot drift apart — the
+    panel reports the current settings' numbers first and the lifetime ones beside them.
+    """
+    # Columns read positionally, not by name: the bot shares this function and its
+    # connection has no row_factory, so name access raised TypeError there.
+    rows = c.execute(
+        "SELECT pnl_sol,pnl_pct FROM paper_trades WHERE action='EXIT' AND event_ts>?",
+        (since,),
+    ).fetchall()
+    pnls = [r[0] for r in rows]
+    pcts = [r[1] for r in rows]
+    wins = sum(1 for p in pnls if p > 0)
+    return {
+        "closed": len(rows),
+        "wins": wins,
+        "losses": len(rows) - wins,
+        "winrate_pct": (wins / len(rows) * 100) if rows else 0.0,
+        "realized_sol": sum(pnls),
+        "best_pct": max(pcts, default=0.0) * 100,
+        "worst_pct": min(pcts, default=0.0) * 100,
+    }
+
+
 def api_overview() -> dict:
     c = db()
     try:
@@ -214,13 +240,17 @@ def api_overview() -> dict:
         equity = (a["budget_sol"] if a else 0.0) + open_value
         initial = a["initial_budget_sol"] if a else 0.0
 
-        closed = c.execute(
-            "SELECT pnl_sol,pnl_pct FROM paper_trades WHERE action='EXIT'"
-        ).fetchall()
-        wins = [r for r in closed if r["pnl_sol"] > 0]
-        realized = sum(r["pnl_sol"] for r in closed)
-        best = max((r["pnl_pct"] for r in closed), default=0.0)
-        worst = min((r["pnl_pct"] for r in closed), default=0.0)
+        # Two periods, same shape. `current` is what the settings in force have done
+        # since the last top-up; `lifetime` still carries whatever came before it.
+        reset_at = pe.reset_ts(c)
+        lifetime = performance(c, 0)
+        current = performance(c, reset_at) if reset_at else lifetime
+        # Balance the account was restored to. Derived rather than stored: the top-up
+        # raises initial by the same amount, so initial + realised-before-reset is the
+        # balance at that moment, exactly.
+        realized_before = c.execute(
+            "SELECT COALESCE(SUM(pnl_sol),0) FROM paper_trades WHERE action='EXIT' AND event_ts<=?",
+            (reset_at,)).fetchone()[0] if reset_at else 0.0
 
         # `active=1` means eligible to carry weight. Wallets parked at active=0 (too small
         # a sample, or no recent buys) are counted separately rather than hidden, so the
@@ -239,20 +269,26 @@ def api_overview() -> dict:
             "open_value_sol": open_value,
             "total_pnl_sol": equity - initial,
             "total_pnl_pct": ((equity / initial - 1) * 100) if initial else 0.0,
-            "realized_pnl_sol": realized,
-            "reset_at": pe.reset_ts(c),
-            "realized_since_reset_sol": pe.realised_since(c, pe.reset_ts(c))[0] if pe.reset_ts(c) else None,
-            "trades_since_reset": pe.realised_since(c, pe.reset_ts(c))[1] if pe.reset_ts(c) else None,
+            "realized_pnl_sol": lifetime["realized_sol"],
+            "reset_at": reset_at,
+            "lifetime": lifetime,
+            "current": current,
+            # Unrealised P&L belongs to the current period: the reset closed everything,
+            # so every open position was opened under these settings.
+            "current_pnl_sol": current["realized_sol"] + sum(p["pnl_sol"] for p in positions),
+            "current_base_sol": (initial + realized_before) if reset_at else initial,
             "bankrupt": bool(a["bankrupt"]) if a else False,
             "can_open": (a["budget_sol"] if a else 0.0) >= config.STAKE_SOL,
             "open_positions": len(positions),
             "positions": positions,
-            "closed_trades": len(closed),
-            "wins": len(wins),
-            "losses": len(closed) - len(wins),
-            "winrate_pct": (len(wins) / len(closed) * 100) if closed else 0.0,
-            "best_pct": best * 100,
-            "worst_pct": worst * 100,
+            # Kept flat for anything still reading the old shape; both periods are in
+            # "lifetime" and "current" above.
+            "closed_trades": lifetime["closed"],
+            "wins": lifetime["wins"],
+            "losses": lifetime["losses"],
+            "winrate_pct": lifetime["winrate_pct"],
+            "best_pct": lifetime["best_pct"],
+            "worst_pct": lifetime["worst_pct"],
             "wallets_total": wallets["n"] or 0,
             "wallets_elite": wallets["elite"] or 0,
             "wallets_qualified": wallets["qualified"] or 0,
@@ -268,6 +304,8 @@ def api_overview() -> dict:
                 "trailing_distance_pct": config.TRAILING_DISTANCE_PCT,
                 "max_hold_hours": config.MAX_HOLD_SECONDS / 3600,
                 "chains": config.CHAINS, "poll_seconds": config.POLL_SECONDS,
+                "elite_winrate": pe.ELITE_WINRATE,
+                "min_weighted_winrate": pe.MIN_WEIGHTED_WINRATE,
             },
             "server_time": int(time.time()),
         }
@@ -298,6 +336,33 @@ def api_trades(limit: int = 50) -> dict:
         c.close()
 
 
+def winrate_bands(c: sqlite3.Connection) -> list[dict]:
+    """One row per weight tier, counted from the ladder itself.
+
+    Built by iterating WEIGHT_TIERS rather than unpacking a fixed number of them. The
+    previous version did `elite, high, mid = ...`, which was correct for the three tiers
+    that existed when it was written and raised ValueError — a 500 on the wallets tab —
+    the moment the ladder grew to five. Deriving the count is the point of deriving at all.
+    """
+    bands, upper = [], None  # tiers are ordered high to low, so upper starts open-ended
+    for low, weight in pe.WEIGHT_TIERS:
+        if upper is None:
+            n = c.execute("SELECT COUNT(*) FROM wallet_watch WHERE active=1 AND winrate>=?",
+                          (low,)).fetchone()[0]
+            label = f"{low*100:.0f}%+"
+        else:
+            n = c.execute("SELECT COUNT(*) FROM wallet_watch WHERE active=1 AND winrate>=? AND winrate<?",
+                          (low, upper)).fetchone()[0]
+            label = f"{low*100:.0f}–{upper*100:.0f}%"
+        bands.append({"label": label, "min_winrate": low, "weight": weight, "count": n,
+                      "enters_alone": weight >= config.ENTRY_SCORE})
+        upper = low
+    unknown = c.execute("SELECT COUNT(*) FROM wallet_watch WHERE active=1 AND winrate=0").fetchone()[0]
+    bands.append({"label": "не оценены", "min_winrate": 0.0, "weight": 0.0,
+                  "count": unknown, "enters_alone": False})
+    return bands
+
+
 def api_wallets(limit: int = 100) -> dict:
     c = db()
     try:
@@ -306,20 +371,10 @@ def api_wallets(limit: int = 100) -> dict:
             "WHERE active=1 AND winrate>0 ORDER BY winrate DESC, last_seen DESC LIMIT ?",
             (limit,),
         ).fetchall()
-        # Buckets follow paper_engine's weight ladder, so the panel cannot show a
-        # grouping that no longer matches what actually carries weight.
-        elite, high, mid = (t[0] for t in pe.WEIGHT_TIERS)
-        buckets = c.execute(
-            f"SELECT SUM(winrate>={pe.ELITE_WINRATE}) w90, "
-            f"SUM(winrate>={elite} AND winrate<{pe.ELITE_WINRATE}) w70, "
-            f"SUM(winrate>={high} AND winrate<{elite}) w60, "
-            f"SUM(winrate>={mid} AND winrate<{high}) w50, "
-            "SUM(winrate=0) unknown FROM wallet_watch WHERE active=1"
-        ).fetchone()
         blacklisted = c.execute("SELECT COUNT(*) FROM wallet_blacklist").fetchone()[0]
         return {
             "wallets": [dict(r) for r in rows],
-            "buckets": {k: (buckets[k] or 0) for k in ("w90", "w70", "w60", "w50", "unknown")},
+            "bands": winrate_bands(c),
             "blacklisted": blacklisted,
         }
     finally:
