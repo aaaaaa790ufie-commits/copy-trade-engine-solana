@@ -1598,6 +1598,81 @@ class AuthDefaultTests(unittest.TestCase):
         )
 
 
+class OperatorFacingLabelTests(unittest.TestCase):
+    """Numbers shown to the operator must describe the threshold actually applied.
+
+    Both wallet messages hardcoded "70%" while counting TOP_WINRATE, which the strategy
+    change moved to 90% — so Telegram reported "70%+: 3" about wallets at 90%+.
+    """
+
+    def setUp(self):
+        self._saved = pe.get_stats
+
+    def tearDown(self):
+        pe.get_stats = self._saved
+
+    def _messages(self, c, kind="WALLET"):
+        return [r[0] for r in c.execute("SELECT message FROM engine_events WHERE kind=?", (kind,))]
+
+    def test_new_maker_message_quotes_the_real_threshold(self):
+        c = fresh_db()
+        pe.get_stats = lambda chain, wallets, max_batches=0: {WALLET_A: {"winrate": 0.95, "buy": 9}}
+        pe.learn_new_makers(c, "sol", [{"maker": WALLET_A, "base_address": MINT_A, "side": "buy",
+                                        "timestamp": NOW, "price_usd": 1.0, "launchpad": "pump"}], NOW)
+        msg = self._messages(c)[0]
+        self.assertIn(f"{pe.TOP_WINRATE*100:.0f}%+", msg)
+        self.assertNotIn("70%+", msg, "the label must not name a threshold that is not applied")
+
+    def test_high_winrate_message_quotes_the_real_threshold(self):
+        c = fresh_db()
+        c.execute("INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) "
+                  "VALUES(?,?,?,?,?,?)", (WALLET_A, "sol", "gmgn", 0, 0.60, 0))
+        pe.get_stats = lambda chain, wallets, max_batches=0: {
+            WALLET_A: {"winrate": 0.95, "buy": 12, "sell": 10}}
+        pe.refresh_wallet_stats(c, "sol", NOW)
+        msgs = [m for m in self._messages(c) if "high-winrate" in m]
+        self.assertTrue(msgs)
+        self.assertIn(f">={pe.TOP_WINRATE*100:.0f}%", msgs[0])
+
+    def test_the_label_follows_a_change_to_the_ladder(self):
+        saved = pe.TOP_WINRATE
+        try:
+            pe.TOP_WINRATE = 0.75
+            c = fresh_db()
+            pe.get_stats = lambda chain, wallets, max_batches=0: {WALLET_A: {"winrate": 0.80, "buy": 9}}
+            pe.learn_new_makers(c, "sol", [{"maker": WALLET_A, "base_address": MINT_A, "side": "buy",
+                                            "timestamp": NOW, "price_usd": 1.0, "launchpad": "pump"}], NOW)
+            self.assertIn("75%+", self._messages(c)[0])
+        finally:
+            pe.TOP_WINRATE = saved
+
+
+class WeightDerivationTests(unittest.TestCase):
+    """cycle() and cached_weights must derive weights the same way.
+
+    They had drifted into two copies of the comprehension, so the tests were exercising
+    a path production no longer took.
+    """
+
+    def test_cached_weights_is_the_derivation_cycle_uses(self):
+        c = fresh_db()
+        c.executemany(
+            "INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) "
+            "VALUES(?,?,?,?,?,?)",
+            [(mint_n(i), "sol", "gmgn", 0, wr, NOW)
+             for i, wr in enumerate((0.95, 0.85, 0.75, 0.65, 0.55, 0.40))])
+
+        winrates = pe.cached_winrates(c, "sol")
+        self.assertEqual(pe.weights_from(winrates), pe.cached_weights(c, "sol"))
+
+    def test_sub_threshold_wallets_carry_no_weight(self):
+        self.assertEqual(pe.weights_from({"a": 0.40, "b": 0.49}), {})
+
+    def test_weights_match_the_ladder(self):
+        got = pe.weights_from({"a": 0.95, "b": 0.85, "c": 0.75, "d": 0.65, "e": 0.55})
+        self.assertEqual(got, {"a": 1.0, "b": 0.5, "c": 0.25, "d": 0.0625, "e": 0.03125})
+
+
 class PeriodSplitTests(unittest.TestCase):
     """Headline metrics lead with the current settings; lifetime goes in parentheses."""
 

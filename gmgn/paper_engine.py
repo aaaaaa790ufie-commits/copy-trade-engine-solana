@@ -210,7 +210,7 @@ def refresh_wallet_stats(c,chain,now):
    c.execute("UPDATE wallet_watch SET updated_at=? WHERE address=? AND chain=?",(now,w,chain))
  if upd:
   LOG.info("refreshed stats for %d/%d stale wallets on %s",upd,len(addrs),chain)
-  if new_high: emit(c,"WALLET",f"{chain} | NEW high-winrate: {len(new_high)} wallet(s) >=70%, ex: {new_high[0][0]}... {new_high[0][1]*100:.0f}%")
+  if new_high: emit(c,"WALLET",f"{chain} | NEW high-winrate: {len(new_high)} wallet(s) >={TOP_WINRATE*100:.0f}%, ex: {new_high[0][0]}... {new_high[0][1]*100:.0f}%")
  return upd
 _DISCOV_CYCLE=0
 def discover_wallets(c,chain,now):
@@ -387,6 +387,12 @@ def wallet_attribution(c,limit=20):
 def cached_winrates(c,chain):
  """Raw win rates for every wallet eligible to carry weight, keyed by address."""
  return {a:w for a,w in c.execute(f"SELECT address,winrate FROM wallet_watch WHERE chain=? AND active=1 AND winrate>={MIN_WEIGHTED_WINRATE}",(chain,))}
+def weights_from(winrates):
+ """Non-zero weights for an address -> win rate mapping.
+
+ One derivation, used by cycle() and by cached_weights alike. They had drifted into
+ two copies, so the tests were exercising a path production no longer took."""
+ return {a:weight(w) for a,w in winrates.items() if weight(w)>0}
 def cached_weights(c,chain):
  """Weights straight from the winrates already stored in wallet_watch.
 
@@ -394,7 +400,7 @@ def cached_weights(c,chain):
  up to 20 round-trips of 45s each, which is what used to delay stop-loss checks by
  tens of minutes. Winrates barely move over an hour, so the cached value is just as
  good a weight, and refresh_wallet_stats keeps it current in the background."""
- return {a:weight(w) for a,w in c.execute(f"SELECT address,winrate FROM wallet_watch WHERE chain=? AND active=1 AND winrate>={MIN_WEIGHTED_WINRATE}",(chain,)) if weight(w)>0}
+ return weights_from(cached_winrates(c,chain))
 def learn_new_makers(c,chain,trades,now):
  """Look up only makers we have never scored before, a few batches per cycle."""
  seen={r[0] for r in c.execute("SELECT address FROM wallet_watch WHERE chain=?",(chain,))}
@@ -409,7 +415,7 @@ def learn_new_makers(c,chain,trades,now):
   if wrv>=TOP_WINRATE: high_wr.append((w[:8],wrv))
  if new_w:
   total=c.execute("SELECT COUNT(*) FROM wallet_watch WHERE chain=? AND active=1",(chain,)).fetchone()[0]
-  s=f"70%+: {len(high_wr)}"+(f" ex: {high_wr[0][0]}... {high_wr[0][1]*100:.0f}%" if high_wr else "")
+  s=f"{TOP_WINRATE*100:.0f}%+: {len(high_wr)}"+(f" ex: {high_wr[0][0]}... {high_wr[0][1]*100:.0f}%" if high_wr else "")
   emit(c,"WALLET",f"{chain} | +{new_w} новых, всего {total} | {s}")
  return stats
 ALIVE_GRACE=config.get_int("GMGN_ALIVE_GRACE_SECONDS",120)
@@ -498,7 +504,7 @@ def cycle(c):
   if not trades: continue
   # 3. Entry decisions off cached winrates, plus a bounded lookup of unseen makers.
   learn_new_makers(c,chain,trades,now)
-  winrates=cached_winrates(c,chain); weights={a:weight(w) for a,w in winrates.items() if weight(w)>0}
+  winrates=cached_winrates(c,chain); weights=weights_from(winrates)
   enter(c,chain,trades,weights,now,winrates); save_token_scores(c,chain,trades,weights,now)
   missed_elite_signals(c,chain,trades,now,since)
   # 4. Background bookkeeping, throttled so it cannot dominate the loop. The last run is
