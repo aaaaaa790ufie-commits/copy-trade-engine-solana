@@ -79,8 +79,21 @@ which delayed stops by tens of minutes and produced two −99.99% exits on a −
 stop. `test_exits_run_before_wallet_stats` guards this.
 
 Entry weights come from `cached_winrates()` — the win rates already in `wallet_watch` —
-so the fast path costs one API call. `refresh_wallet_stats` keeps those values current
-in the background, bounded by `GMGN_STATS_BATCH_MAX`.
+so the fast path costs one API call. `refresh_wallet_stats` renews them in the
+background, bounded by `GMGN_STATS_BATCH_MAX`.
+
+**It does not keep up, and the weights are older than they look.** The cap is
+`GMGN_STATS_BATCH_MAX × 10` wallets per maintenance pass — 60 per 10 minutes, 360/h —
+against a pool of ~1240 on a 1 h `GMGN_STATS_TTL_SECONDS`. Measured 2026-07-27: 913 of
+the weighted win rates were over 24 h old and only 37 under an hour. The bound is
+deliberate (a stats sweep must never delay a stop check — see the ordering note above),
+so this is a capacity limit, not a bug; raising it trades stop-loss latency for weight
+freshness and is the operator's call. See `ISSUES.md` #8.
+
+The refresh queue puts **never-scored wallets first**, then the longest-stale. Ordering
+by `updated_at` alone sorted a newly discovered wallet last — 3.3 h to reach the front,
+while `cleanup_wallets` deletes an unscored wallet after 1 h, so discovery fed wallets
+straight into deletion without ever scoring them.
 
 ## Key parameters
 

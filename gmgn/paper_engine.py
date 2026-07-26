@@ -199,7 +199,18 @@ STATS_REFRESH_SEC=config.STATS_TTL
 # the price checks that close positions.
 STATS_BATCH_MAX=config.get_int("GMGN_STATS_BATCH_MAX",6)
 def refresh_wallet_stats(c,chain,now):
- stale=c.execute("SELECT address FROM wallet_watch WHERE chain=? AND (winrate=0 OR ?-updated_at>=?) ORDER BY updated_at LIMIT ?",(chain,now,STATS_REFRESH_SEC,STATS_BATCH_MAX*10)).fetchall()
+ # Never-scored wallets first, then the longest-stale. The queue was ordered by
+ # updated_at alone, and a newly discovered wallet is inserted with updated_at=now — so
+ # it sorted *last*, behind every wallet already carrying a usable win rate. Measured on
+ # the live pool: 1204 ahead of it, 60 refreshed per 10-minute pass, so 3.3 h to reach
+ # the front — while cleanup_wallets deletes an unscored wallet after ZERO_TTL, 1 h. The
+ # engine was discovering wallets, never scoring them, and throwing them away; the pool
+ # count visibly oscillated as it did.
+ #
+ # Prioritising costs nothing: same batch cap, same API budget. It is strictly the
+ # better order anyway — a wallet with no win rate carries no weight and is invisible to
+ # the strategy, while one whose rate is three hours old is still perfectly usable.
+ stale=c.execute("SELECT address FROM wallet_watch WHERE chain=? AND (winrate=0 OR ?-updated_at>=?) ORDER BY winrate>0, updated_at LIMIT ?",(chain,now,STATS_REFRESH_SEC,STATS_BATCH_MAX*10)).fetchall()
  if not stale: return 0
  addrs=[r[0] for r in stale]; st=get_stats(chain,addrs,max_batches=STATS_BATCH_MAX); upd=0; new_high=[]
  for w,data in st.items():

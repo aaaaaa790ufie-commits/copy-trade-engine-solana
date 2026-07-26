@@ -195,3 +195,46 @@ place, on the grounds that "probably dead" is not "dead".
 **The decision:** whether to delete the legacy tree, move it to an `archive/` branch, or
 keep and document it. Deleting is right if the Rust engine is abandoned; it is wrong if
 it is a parallel effort. That is not something the code can tell me.
+
+---
+
+## 8. Entry weights are computed from win rates that are mostly a day old
+
+**Status:** open. The prioritisation bug behind it is fixed; the capacity limit is a
+risk trade-off and is the operator's to make.
+
+`cached_winrates()` supplies the weights every entry decision is made from.
+`refresh_wallet_stats` renews them, capped at `GMGN_STATS_BATCH_MAX × 10` wallets per
+maintenance pass — 60 per 10 minutes, 360/h — against ~1240 wallets on a 1 h
+`GMGN_STATS_TTL_SECONDS`. It cannot keep up by roughly 3.5×, so the pool is permanently
+behind. Measured 2026-07-27 on the live database:
+
+| Age of the win rate carrying weight | Wallets |
+|---|---:|
+| under 1 h | 37 |
+| 1 h – 24 h | 227 |
+| **over 24 h** | **913** |
+
+**Cost of leaving it:** a wallet is weighted on what it was doing yesterday. That cuts
+both ways — a wallet that has since collapsed still carries a 90% weight and can open a
+position on its own, and one that has improved is under-weighted. It does not corrupt
+the books or risk capital beyond a single stake, but it does mean "90% win rate" in the
+panel is a claim about the recent past, not the present.
+
+**What was already fixed** (Pass 25): the refresh queue was ordered by `updated_at`
+alone, so a newly discovered wallet — inserted with `updated_at=now` — sorted *last*,
+behind 1204 already-scored ones. It needed 3.3 h to reach the front while
+`cleanup_wallets` deletes an unscored wallet after 1 h, so the engine was discovering
+wallets and deleting them without ever scoring them; the pool count visibly oscillated.
+Never-scored wallets now come first. That costs nothing — same batch cap, same API
+budget — but it does not change throughput.
+
+**The decision:** raising `GMGN_STATS_BATCH_MAX` (or shortening
+`GMGN_MAINTENANCE_SECONDS`) buys freshness with stop-loss latency. Maintenance runs
+after `exits()` precisely so it cannot delay a stop check, and the cap exists because a
+20-round-trip sweep at 45 s per call once delayed stops by tens of minutes and produced
+two −99.99% exits. A larger cap moves back toward that failure.
+
+**Not done automatically because** it trades a documented, previously-realised risk to
+capital against an accuracy improvement, and the exchange rate is a judgement about how
+much staleness matters — which the eleven-trade sample cannot settle either way.

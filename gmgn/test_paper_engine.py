@@ -179,6 +179,35 @@ class WalletEligibilityTests(unittest.TestCase):
         c.execute("INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) "
                   "VALUES(?,?,?,?,?,?)", (address, "sol", "gmgn", 0, winrate, 0))
 
+    def test_never_scored_wallets_are_refreshed_before_re_checks(self):
+        """A wallet with no win rate carries no weight and is invisible to the strategy.
+        One whose rate is hours old is still usable. The queue was ordered by updated_at
+        alone, and discovery inserts with updated_at=now — so a new wallet sorted last,
+        behind everything already scored.
+
+        Measured on the live pool when this was found: 1204 wallets ahead of a newly
+        discovered one, 60 refreshed per 10-minute pass, so 3.3 h to reach the front —
+        while cleanup_wallets deletes an unscored wallet after ZERO_TTL, 1 h. Discovery
+        was feeding wallets straight into deletion without ever scoring them.
+        """
+        c = fresh_db()
+        # 80 already-scored wallets, all long stale, plus 3 discovered just now.
+        for i in range(80):
+            c.execute("INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) "
+                      "VALUES(?,?,?,?,?,?)", (mint_n(i), "sol", "gmgn", 0, 0.75, 1))
+        newcomers = [mint_n(500 + i) for i in range(3)]
+        for addr in newcomers:
+            c.execute("INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) "
+                      "VALUES(?,?,?,?,?,?)", (addr, "sol", "gmgn", 0, 0, NOW))
+
+        asked = []
+        pe.get_stats = lambda chain, wallets, max_batches=0: asked.extend(wallets) or {}
+        pe.refresh_wallet_stats(c, "sol", NOW)
+
+        for addr in newcomers:
+            self.assertIn(addr, asked,
+                          "a wallet with no win rate must not wait behind scored ones")
+
     def test_dormant_high_winrate_wallet_is_parked_not_banned(self):
         c = fresh_db()
         self._seed(c, "dormant", 0.80)
