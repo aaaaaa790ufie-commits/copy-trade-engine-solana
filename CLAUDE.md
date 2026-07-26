@@ -78,6 +78,12 @@ must stay ahead of anything that calls the stats API. They used to run after a
 which delayed stops by tens of minutes and produced two −99.99% exits on a −45% hard
 stop. `test_exits_run_before_wallet_stats` guards this.
 
+`exits()` prices open positions serially, one `token_price` call each — measured at
+~1.0 s (n=8, min 0.97, max 1.08). At the current `PAPER_BUDGET_SOL / PAPER_TRADE_SIZE_SOL`
+that is at most 4 positions, so ~4 s, and the 60 s price cache means most cycles skip it.
+It is O(open positions) though: raising the budget without revisiting this eventually
+puts the last position's stop check behind every earlier lookup.
+
 Entry weights come from `cached_winrates()` — the win rates already in `wallet_watch` —
 so the fast path costs one API call. `refresh_wallet_stats` renews them in the
 background, bounded by `GMGN_STATS_BATCH_MAX`.

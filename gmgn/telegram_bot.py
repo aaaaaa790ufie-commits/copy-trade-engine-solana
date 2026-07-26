@@ -11,6 +11,7 @@ import logging
 import os
 import sqlite3
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -168,10 +169,31 @@ def load_cursor() -> int | None:
 
 
 def save_cursor(eid: int) -> None:
+    """Persist the cursor atomically: write a sibling temp file, then rename over.
+
+    A plain write_text can be interrupted, and the supervisor terminates this process
+    routinely — on every tunnel URL change, which is hourly on a free pinggy session.
+    A half-written file makes load_cursor() return None, catch_up() read that as a first
+    run, and the whole pending backlog gets skipped, which is the exact outcome catch_up
+    exists to prevent. os.replace is atomic on POSIX and on Windows.
+    """
+    tmp = None
     try:
-        STATE_PATH.write_text(json.dumps({"last_event": eid}), encoding="utf-8")
+        fd, tmp = tempfile.mkstemp(dir=str(STATE_PATH.parent), prefix=".bot_state.", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"last_event": eid}, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, STATE_PATH)
+        tmp = None
     except OSError as e:
         LOG.warning("could not persist the event cursor to %s: %s", STATE_PATH, e)
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def catch_up(c: sqlite3.Connection) -> None:

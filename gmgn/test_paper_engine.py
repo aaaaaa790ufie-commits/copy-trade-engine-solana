@@ -560,6 +560,36 @@ class AttributionTests(unittest.TestCase):
         realised = c.execute("SELECT SUM(pnl_sol) FROM paper_trades WHERE action='EXIT'").fetchone()[0]
         self.assertAlmostEqual(attributed, realised, places=9)
 
+    def test_the_same_mint_traded_twice_splits_between_its_two_signals(self):
+        """wallet_attribution matches an entry to "the next EXIT on that mint", and calls
+        it exact because a mint has at most one open position at a time. Every other test
+        here uses distinct mints, so the one case that claim is actually about — the same
+        mint entered, closed, and entered again by a different wallet — was never driven.
+        """
+        c = fresh_db()
+        winrates = {WALLET_A: 0.92, WALLET_B: 0.92}
+        weights = {w: pe.weight(v) for w, v in winrates.items()}
+
+        pe.token_price = lambda ch, m: 1.0
+        pe.enter(c, "sol", [self._buy(WALLET_A, MINT_A, NOW)], weights, NOW, winrates)
+        pe.token_price = lambda ch, m: 3.0
+        pe.exits(c, "sol", [], NOW + 1)
+        pe.token_price = lambda ch, m: 2.0            # trailing exit, a winner
+        pe.exits(c, "sol", [], NOW + 2)
+
+        c.execute("DELETE FROM paper_cooldowns")      # cooldown lapses
+        t2 = NOW + pe.COOLDOWN + 10
+        pe.token_price = lambda ch, m: 1.0
+        pe.enter(c, "sol", [self._buy(WALLET_B, MINT_A, t2)], weights, t2, winrates)
+        pe.token_price = lambda ch, m: 0.4            # hard stop, a loser
+        pe.exits(c, "sol", [], t2 + 1)
+
+        rows = {r["address"]: r["attributed_sol"] for r in pe.wallet_attribution(c, limit=0)}
+        realised = c.execute("SELECT SUM(pnl_sol) FROM paper_trades WHERE action='EXIT'").fetchone()[0]
+        self.assertGreater(rows[WALLET_A], 0, "the first signal owns the winning round trip")
+        self.assertLess(rows[WALLET_B], 0, "the second owns the losing one")
+        self.assertAlmostEqual(sum(rows.values()), realised, places=9)
+
     def test_an_open_position_is_not_attributed_yet(self):
         c = fresh_db()
         winrates = {WALLET_A: 0.92}
@@ -3419,6 +3449,59 @@ class PushThrottleTests(unittest.TestCase):
         self.assertEqual(self.bot._last_event, 5, "the cursor must clear every row it read")
         self.assertEqual(sum("ENTRY" in t for t in sent), 1, "the entry must still arrive")
         self.assertEqual(sum("WALLET" in t for t in sent), 1, "four wallet events, one message")
+
+
+class CursorPersistenceTests(unittest.TestCase):
+    """The event cursor is what stops a restart dropping the backlog. The supervisor
+    terminates the bot routinely — every tunnel URL change, hourly on a free session —
+    so the write has to survive being interrupted."""
+
+    def setUp(self):
+        import telegram_bot
+        self.bot = telegram_bot
+        self._path = telegram_bot.STATE_PATH
+        telegram_bot.STATE_PATH = pathlib.Path(tempfile.mkdtemp()) / "bot_state.json"
+        self.addCleanup(lambda: setattr(telegram_bot, "STATE_PATH", self._path))
+
+    def test_a_cursor_round_trips(self):
+        self.bot.save_cursor(42)
+        self.assertEqual(self.bot.load_cursor(), 42)
+
+    def test_zero_is_a_cursor_not_an_absence(self):
+        # A database whose journal is still empty has a legitimate cursor of 0.
+        self.bot.save_cursor(0)
+        self.assertEqual(self.bot.load_cursor(), 0)
+
+    def test_no_state_file_reads_as_a_first_run(self):
+        self.assertIsNone(self.bot.load_cursor())
+
+    def test_the_write_leaves_no_partial_file_behind(self):
+        self.bot.save_cursor(7)
+        leftovers = [p.name for p in self.bot.STATE_PATH.parent.iterdir()
+                     if p.name != self.bot.STATE_PATH.name]
+        self.assertEqual(leftovers, [], "the temp file must be renamed, not accumulated")
+
+    def test_an_interrupted_write_cannot_cost_the_backlog(self):
+        """A half-written file makes load_cursor() return None, catch_up() read that as a
+        first run, and the whole pending backlog is skipped — the exact outcome catch_up
+        exists to prevent. os.replace makes the file either the old one or the new one."""
+        self.bot.save_cursor(3)
+        # Whatever a crash leaves in the directory, the cursor file itself is intact
+        # because it is only ever swapped in whole.
+        (self.bot.STATE_PATH.parent / ".bot_state.abc.tmp").write_text('{"last_ev', encoding="utf-8")
+        self.assertEqual(self.bot.load_cursor(), 3, "a stray temp file must not be read")
+
+        c = fresh_db()
+        for i in range(5):
+            c.execute("INSERT INTO engine_events(event_ts,kind,message) VALUES(?,?,?)",
+                      (NOW + i, "EXIT", f"exit {i}"))
+        c.commit()
+        saved_api, saved_ev = self.bot.api, self.bot._last_event
+        self.bot.api = lambda m, d=None: {}
+        self.addCleanup(lambda: setattr(self.bot, "api", saved_api))
+        self.addCleanup(lambda: setattr(self.bot, "_last_event", saved_ev))
+        self.bot.catch_up(c)
+        self.assertEqual(self.bot._last_event, 3, "the backlog past the cursor must remain")
 
 
 class BotCommandListTests(unittest.TestCase):
