@@ -179,6 +179,68 @@ class WalletEligibilityTests(unittest.TestCase):
         c.execute("INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) "
                   "VALUES(?,?,?,?,?,?)", (address, "sol", "gmgn", 0, winrate, 0))
 
+    def _pool(self, unscored, stale):
+        c = fresh_db()
+        for i in range(unscored):
+            c.execute("INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) "
+                      "VALUES(?,?,?,?,?,?)", (mint_n(i), "sol", "gmgn", 0, 0, NOW))
+        for i in range(stale):
+            c.execute("INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) "
+                      "VALUES(?,?,?,?,?,?)", (mint_n(5000 + i), "sol", "gmgn", 0, 0.75, 1))
+        return c
+
+    def _split(self, c, limit=60):
+        unscored = {r[0] for r in c.execute("SELECT address FROM wallet_watch WHERE winrate=0")}
+        picked = pe.refresh_queue(c, "sol", NOW, limit)
+        return sum(1 for a in picked if a in unscored), sum(1 for a in picked if a not in unscored)
+
+    def test_neither_group_can_starve_the_other(self):
+        """Both orders are wrong on their own.
+
+        By updated_at alone, never-scored wallets sort last (discovery inserts them with
+        updated_at=now) and are deleted by cleanup_wallets before they are ever reached.
+        Unscored-first fixes that and creates the mirror: a wallet the API answers about
+        with no usable stats keeps winrate=0 *and* gets its updated_at bumped, which
+        resets the timer that would have deleted it — so it never leaves the front, and
+        enough of those means no scored wallet is re-checked again.
+        """
+        self.assertEqual(self._split(self._pool(65, 1177)), (30, 30), "both make progress")
+        self.assertEqual(self._split(self._pool(200, 1177)), (30, 30),
+                         "permanently unscoreable wallets must not consume the batch")
+        self.assertEqual(self._split(self._pool(0, 1177)), (0, 60), "no unscored: all re-checks")
+        self.assertEqual(self._split(self._pool(65, 0)), (60, 0), "no stale: all unscored")
+        self.assertEqual(self._split(self._pool(5, 3)), (5, 3), "small pool: everything")
+        self.assertEqual(self._split(self._pool(0, 0)), (0, 0))
+
+    def test_an_unscoreable_wallet_does_not_hold_the_front_forever(self):
+        # The regression the split exists to prevent, driven end to end.
+        c = self._pool(0, 200)
+        duds = [mint_n(9000 + i) for i in range(80)]
+        for a in duds:
+            c.execute("INSERT INTO wallet_watch(address,chain,source,last_seen,winrate,updated_at) "
+                      "VALUES(?,?,?,?,?,?)", (a, "sol", "gmgn", 0, 0, NOW))
+        # GMGN answers for the duds, with nothing usable — refresh bumps updated_at,
+        # which resets cleanup_wallets' deletion timer, so they never age out.
+        pe.get_stats = lambda chain, wallets, max_batches=0: {
+            a: {"winrate": 0, "buy": 0, "sell": 0} for a in wallets if a in duds}
+
+        at, remaining = NOW, [len(duds)]
+        for _ in range(3):
+            at += pe.ZERO_TTL + 60
+            pe.refresh_wallet_stats(c, "sol", at)
+            pe.cleanup_wallets(c, "sol", at)
+            remaining.append(
+                c.execute("SELECT COUNT(*) FROM wallet_watch WHERE winrate=0").fetchone()[0])
+
+        scored = {r[0] for r in c.execute("SELECT address FROM wallet_watch WHERE winrate>0")}
+        picked = pe.refresh_queue(c, "sol", at, 60)
+        self.assertGreaterEqual(sum(1 for a in picked if a in scored), 30,
+                                "scored wallets must still get re-checked")
+        # And the duds drain rather than accumulate: only the half-batch that is queried
+        # gets its updated_at bumped, so the rest age past ZERO_TTL and cleanup takes
+        # them. Capping their share of the batch is what lets them expire at all.
+        self.assertLess(remaining[-1], remaining[0], f"unscoreable wallets must drain: {remaining}")
+
     def test_never_scored_wallets_are_refreshed_before_re_checks(self):
         """A wallet with no win rate carries no weight and is invisible to the strategy.
         One whose rate is hours old is still usable. The queue was ordered by updated_at

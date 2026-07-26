@@ -198,21 +198,38 @@ STATS_REFRESH_SEC=config.STATS_TTL
 # Wallet bookkeeping is background work: bounded per pass so it can never crowd out
 # the price checks that close positions.
 STATS_BATCH_MAX=config.get_int("GMGN_STATS_BATCH_MAX",6)
+def refresh_queue(c,chain,now,limit):
+ """Which wallets to re-query this pass: unscored and stale, neither able to starve the other.
+
+ Two failure modes, and picking one order produces the opposite one.
+
+ Ordering by `updated_at` alone put never-scored wallets *last*, because discovery
+ inserts them with updated_at=now. Measured on the live pool: 1204 wallets ahead of a
+ new one at 60 per pass — 3.3 h to reach the front, while cleanup_wallets deletes an
+ unscored wallet after ZERO_TTL, 1 h. The engine discovered wallets and threw them away
+ without ever scoring them.
+
+ Ordering unscored first fixes that and creates the mirror image. A wallet the API
+ answers about but with no usable stats keeps winrate=0 *and* has its updated_at bumped
+ below, which resets the very timer cleanup_wallets would delete it by — so it never
+ ages out and never leaves the front of the queue. Enough of those and no scored wallet
+ is ever re-checked. Manual seeds are the standing case, since cleanup never drops them.
+
+ So: split the batch. Each group is guaranteed half, and takes whatever half the other
+ does not need. Both always make progress, whatever the pool looks like.
+ """
+ unscored=[r[0] for r in c.execute(
+  "SELECT address FROM wallet_watch WHERE chain=? AND winrate=0 ORDER BY updated_at LIMIT ?",
+  (chain,limit))]
+ stale=[r[0] for r in c.execute(
+  "SELECT address FROM wallet_watch WHERE chain=? AND winrate>0 AND ?-updated_at>=? ORDER BY updated_at LIMIT ?",
+  (chain,now,STATS_REFRESH_SEC,limit))]
+ take_unscored=min(len(unscored),max(limit//2,limit-len(stale)))
+ return unscored[:take_unscored]+stale[:limit-take_unscored]
 def refresh_wallet_stats(c,chain,now):
- # Never-scored wallets first, then the longest-stale. The queue was ordered by
- # updated_at alone, and a newly discovered wallet is inserted with updated_at=now — so
- # it sorted *last*, behind every wallet already carrying a usable win rate. Measured on
- # the live pool: 1204 ahead of it, 60 refreshed per 10-minute pass, so 3.3 h to reach
- # the front — while cleanup_wallets deletes an unscored wallet after ZERO_TTL, 1 h. The
- # engine was discovering wallets, never scoring them, and throwing them away; the pool
- # count visibly oscillated as it did.
- #
- # Prioritising costs nothing: same batch cap, same API budget. It is strictly the
- # better order anyway — a wallet with no win rate carries no weight and is invisible to
- # the strategy, while one whose rate is three hours old is still perfectly usable.
- stale=c.execute("SELECT address FROM wallet_watch WHERE chain=? AND (winrate=0 OR ?-updated_at>=?) ORDER BY winrate>0, updated_at LIMIT ?",(chain,now,STATS_REFRESH_SEC,STATS_BATCH_MAX*10)).fetchall()
- if not stale: return 0
- addrs=[r[0] for r in stale]; st=get_stats(chain,addrs,max_batches=STATS_BATCH_MAX); upd=0; new_high=[]
+ addrs=refresh_queue(c,chain,now,STATS_BATCH_MAX*10)
+ if not addrs: return 0
+ st=get_stats(chain,addrs,max_batches=STATS_BATCH_MAX); upd=0; new_high=[]
  for w,data in st.items():
   wrv=wr(data); bc=int(n(data,"buy","buy_count","trades_7d")); sc=int(n(data,"sell","sell_count")); total_buys=max(bc,sc)
   # Ineligible is not the same as bad. A wallet with too small a sample, or one that
