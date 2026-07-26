@@ -26,9 +26,24 @@ WALLET_B = "AUCuaE1ZfgKAReZedngX55iW1NaCjFcDQ1pRvP4caix8"
 WALLET_C = "J9unx3pHCpPhJjatSTnZDg1vvbviWn2gAqU5uyGpumpX"
 
 
+_B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
 def mint_n(i):
-    """Distinct valid mints for bulk fixtures."""
-    return f"{i:04d}" + MINT_A[4:]
+    """Distinct, and actually valid, mints for bulk fixtures.
+
+    The prefix is encoded in the base58 alphabet. It used to be f"{i:04d}", which
+    zero-pads — and base58 has no '0', so *every* address this produced was rejected by
+    valid_address(). Anything routed through the engine's address boundary was silently
+    dropped and the assertions about it passed on empty results. test_backlog_is_capped
+    fed 100 of these to missed_elite_signals and asserted 0 <= 10, proving nothing; it is
+    the exact failure the header of this file warns about.
+    """
+    prefix = ""
+    for _ in range(4):
+        prefix = _B58[i % 58] + prefix
+        i //= 58
+    return prefix + MINT_A[4:]
 
 
 def fresh_db():
@@ -240,6 +255,24 @@ class WalletEligibilityTests(unittest.TestCase):
         # gets its updated_at bumped, so the rest age past ZERO_TTL and cleanup takes
         # them. Capping their share of the batch is what lets them expire at all.
         self.assertLess(remaining[-1], remaining[0], f"unscoreable wallets must drain: {remaining}")
+
+    def test_blacklisted_makers_are_dropped_before_the_stats_call(self):
+        """The loop already skipped them — after get_stats had paid for them. In a live
+        feed sample 21 of 22 unknown makers were blacklisted, so nearly the whole
+        per-cycle stats budget went on wallets discarded on the next line, every poll,
+        ahead of enter()."""
+        c = fresh_db()
+        banned, fresh = mint_n(1), mint_n(2)
+        c.execute("INSERT INTO wallet_blacklist VALUES(?,?,?,?)", (banned, "sol", NOW, "low_winrate"))
+        trades = [{"maker": a, "base_address": MINT_A, "side": "buy", "timestamp": NOW,
+                   "price_usd": 1.0, "launchpad": "pump"} for a in (banned, fresh)]
+
+        asked = []
+        pe.get_stats = lambda chain, wallets, max_batches=0: (asked.extend(wallets) or {})
+        pe.learn_new_makers(c, "sol", trades, NOW)
+
+        self.assertNotIn(banned, asked, "a blacklisted maker must not cost an API call")
+        self.assertIn(fresh, asked, "an unknown maker must still be looked up")
 
     def test_never_scored_wallets_are_refreshed_before_re_checks(self):
         """A wallet with no win rate carries no weight and is invisible to the strategy.

@@ -497,7 +497,13 @@ def cached_weights(c,chain):
 def learn_new_makers(c,chain,trades,now):
  """Look up only makers we have never scored before, a few batches per cycle."""
  seen={r[0] for r in c.execute("SELECT address FROM wallet_watch WHERE chain=?",(chain,))}
- unknown=sorted({wallet(t) for t in trades if wallet(t)} - seen)
+ banned={r[0] for r in c.execute("SELECT address FROM wallet_blacklist WHERE chain=?",(chain,))}
+ # Blacklisted addresses are dropped *before* the stats call, not after. The loop below
+ # already skipped them, but only once get_stats had paid for them — and blacklisted
+ # wallets dominate the feed's unknown makers: 21 of 22 in a live sample, against a
+ # blacklist of 5614. So nearly the whole per-cycle stats budget was being spent
+ # fetching wallets the very next line discarded, every 15-20 seconds, ahead of enter().
+ unknown=sorted({wallet(t) for t in trades if wallet(t)} - seen - banned)
  if not unknown: return {}
  stats=get_stats(chain,unknown,max_batches=STATS_BATCH_MAX); new_w=0; high_wr=[]
  for w,s in stats.items():
