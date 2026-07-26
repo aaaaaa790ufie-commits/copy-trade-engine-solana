@@ -77,13 +77,20 @@ Telegram commands: `/status`, `/positions`, `/trades`, `/wallets`, `/weights`, `
 
 `python gmgn/webapp.py` serves a panel at <http://127.0.0.1:8770> with equity curve, live position P&L, trade history, the wallet pool and tokens approaching the entry threshold. It works in a plain browser as-is.
 
-Telegram only opens Mini Apps over HTTPS, so expose it through a tunnel:
+Telegram only opens Mini Apps over HTTPS, so the panel needs a public origin:
 
 ```bash
-cloudflared tunnel --url http://127.0.0.1:8770
+npm install -g cloudflared
+python gmgn/supervisor.py --tunnel
 ```
 
-Put the resulting `https://…` URL into `WEBAPP_PUBLIC_URL` in `.env` and restart the bot; it installs the panel as the chat's menu button and as a keyboard button. Setting `WEBAPP_PUBLIC_URL` also turns on request signing: the API then requires valid Telegram `initData`, checked by HMAC against the bot token and pinned to `TELEGRAM_CHAT_ID`, so nobody else can read the panel through the tunnel.
+That opens a Cloudflare quick tunnel, hands the generated `https://…trycloudflare.com` URL to the bot, and installs the panel as the chat's menu button and as a keyboard button. The URL is regenerated on every run, so nothing needs pinning in `.env`.
+
+Quick tunnels prefer QUIC on outbound UDP 7844; networks that drop it fall back to HTTP/2 over TCP 443 automatically (`TUNNEL_PROTOCOLS` controls the order).
+
+If you already have a domain or VPS, skip the tunnel and set `WEBAPP_PUBLIC_URL` in `.env` instead.
+
+Either way, a public origin turns on request signing: the API then requires valid Telegram `initData`, checked by HMAC against the bot token and pinned to `TELEGRAM_CHAT_ID`, so nobody else can read the panel through the tunnel.
 
 The API is read-only (`/api/overview`, `/api/trades`, `/api/wallets`, `/api/weights`, `/api/events`, `/api/equity`) and opens the database in SQLite read-only mode.
 

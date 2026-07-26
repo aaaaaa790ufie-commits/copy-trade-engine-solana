@@ -113,11 +113,29 @@ def main() -> None:
     ap.add_argument("--no-bot", action="store_true", help="skip the Telegram bot")
     ap.add_argument("--no-webapp", action="store_true", help="skip the Mini App server")
     ap.add_argument("--no-engine", action="store_true", help="skip the paper engine")
+    ap.add_argument("--tunnel", action="store_true",
+                    help="publish the Mini App over HTTPS with cloudflared and hand the URL to the bot")
     args = ap.parse_args()
     config.use_utf8_stdio()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [supervisor] %(message)s")
 
     py = sys.executable
+    tunnel = None
+    if args.tunnel and not args.no_webapp:
+        from tunnel import Tunnel
+
+        tunnel = Tunnel(config.WEBAPP_PORT)
+        url = tunnel.start()
+        if url:
+            # Children read this from the environment, so the bot installs the button
+            # and the webapp switches auth on without anyone editing .env by hand.
+            os.environ["WEBAPP_PUBLIC_URL"] = url
+            os.environ["WEBAPP_REQUIRE_AUTH"] = "1"
+            config.WEBAPP_PUBLIC_URL = url
+            LOG.info("Mini App published at %s", url)
+        else:
+            LOG.warning("tunnel unavailable — the Mini App stays local-only")
+
     children: list[Child] = []
     if not args.no_engine:
         children.append(Child("engine", [py, "-u", str(HERE / "run_engine.py")]))
@@ -134,7 +152,11 @@ def main() -> None:
     LOG.info("config: %s", config.ENV_PATH)
     LOG.info("mini app: http://%s:%d%s", config.WEBAPP_HOST, config.WEBAPP_PORT,
              f"  (public {config.WEBAPP_PUBLIC_URL})" if config.WEBAPP_PUBLIC_URL else "")
-    supervise(children)
+    try:
+        supervise(children)
+    finally:
+        if tunnel:
+            tunnel.stop()
 
 
 if __name__ == "__main__":
