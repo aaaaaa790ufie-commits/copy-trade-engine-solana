@@ -511,6 +511,107 @@ class ClusterTests(unittest.TestCase):
         self.assertNotIn(MINT_C, published, "a wallet that sold out leaves no score behind")
 
 
+class AccountingInvariantTests(unittest.TestCase):
+    """Properties that must hold after any sequence of entries and exits.
+
+    Verified against the live database during Pass 5 and pinned here so a future change
+    to enter()/exits() cannot quietly break the books.
+    """
+
+    def setUp(self):
+        self._token_price = pe.token_price
+
+    def tearDown(self):
+        pe.token_price = self._token_price
+
+    def _assert_invariants(self, c, where):
+        bal, initial = c.execute(
+            "SELECT budget_sol,initial_budget_sol FROM paper_account WHERE id=1").fetchone()
+        open_stakes = c.execute(
+            "SELECT COALESCE(SUM(stake_sol),0) FROM paper_positions WHERE status='open'").fetchone()[0]
+        realised = c.execute(
+            "SELECT COALESCE(SUM(pnl_sol),0) FROM paper_trades WHERE action='EXIT'").fetchone()[0]
+        entries, exits_ = (c.execute(
+            "SELECT COUNT(*) FROM paper_trades WHERE action=?", (a,)).fetchone()[0]
+            for a in ("ENTRY", "EXIT"))
+        open_now = c.execute(
+            "SELECT COUNT(*) FROM paper_positions WHERE status='open'").fetchone()[0]
+
+        self.assertAlmostEqual(bal + open_stakes, initial + realised, places=9,
+                               msg=f"money is not conserved after {where}")
+        self.assertEqual(entries - exits_, open_now, f"trade log disagrees with positions after {where}")
+        self.assertGreaterEqual(bal, -1e-12, f"balance went negative after {where}")
+
+    def _trade(self, ts):
+        return [{"maker": WALLET_A, "base_address": MINT_A, "side": "buy", "timestamp": ts,
+                 "price_usd": 1.0, "launchpad": "pump"}]
+
+    def test_books_balance_across_a_full_cycle_of_outcomes(self):
+        c = fresh_db()
+        weights = {WALLET_A: 1.0}
+        self._assert_invariants(c, "init")
+
+        # 1. enter
+        pe.token_price = lambda chain, mint: 1.0
+        pe.enter(c, "sol", self._trade(NOW), weights, NOW)
+        self._assert_invariants(c, "entry")
+
+        # 2. a loser: hard stop
+        pe.token_price = lambda chain, mint: 0.4
+        pe.exits(c, "sol", [], NOW + 1)
+        self._assert_invariants(c, "hard stop")
+        self.assertIn("hard stop", c.execute(
+            "SELECT reason FROM paper_trades WHERE action='EXIT' ORDER BY id DESC LIMIT 1").fetchone()[0])
+
+        # 3. re-enter the same mint after the cooldown, then run it up and trail out
+        c.execute("DELETE FROM paper_cooldowns")
+        pe.token_price = lambda chain, mint: 1.0
+        pe.enter(c, "sol", self._trade(NOW + 2), weights, NOW + 2)
+        self._assert_invariants(c, "re-entry")
+
+        pe.token_price = lambda chain, mint: 2.0          # peak
+        pe.exits(c, "sol", [], NOW + 3)
+        pe.token_price = lambda chain, mint: 1.6          # 20% off peak, trailing armed
+        pe.exits(c, "sol", [], NOW + 4)
+        self._assert_invariants(c, "trailing stop")
+        self.assertIn("trailing", c.execute(
+            "SELECT reason FROM paper_trades WHERE action='EXIT' ORDER BY id DESC LIMIT 1").fetchone()[0])
+
+        # 4. a position that ages out
+        c.execute("DELETE FROM paper_cooldowns")
+        pe.token_price = lambda chain, mint: 1.0
+        pe.enter(c, "sol", self._trade(NOW + 5), weights, NOW + 5)
+        pe.exits(c, "sol", [], NOW + 5 + pe.MAX_HOLD + 1)
+        self._assert_invariants(c, "max hold")
+
+        self.assertEqual(
+            c.execute("SELECT COUNT(*) FROM paper_positions WHERE status='open'").fetchone()[0], 0)
+
+    def test_a_winning_exit_returns_more_than_the_stake(self):
+        c = fresh_db()
+        before = c.execute("SELECT budget_sol FROM paper_account WHERE id=1").fetchone()[0]
+        pe.token_price = lambda chain, mint: 1.0
+        pe.enter(c, "sol", self._trade(NOW), {WALLET_A: 1.0}, NOW)
+        pe.token_price = lambda chain, mint: 3.0
+        pe.exits(c, "sol", [], NOW + 1)
+        pe.token_price = lambda chain, mint: 2.0  # off the peak -> trailing exit at +100%
+        pe.exits(c, "sol", [], NOW + 2)
+
+        after = c.execute("SELECT budget_sol FROM paper_account WHERE id=1").fetchone()[0]
+        self.assertGreater(after, before)
+        self._assert_invariants(c, "winning exit")
+
+    def test_stake_is_never_double_spent(self):
+        c = fresh_db()
+        pe.token_price = lambda chain, mint: 1.0
+        # Same signal replayed three times, as the feed genuinely does every poll.
+        for i in range(3):
+            pe.enter(c, "sol", self._trade(NOW + i), {WALLET_A: 1.0}, NOW + i)
+        spent = 0.1 - c.execute("SELECT budget_sol FROM paper_account WHERE id=1").fetchone()[0]
+        self.assertAlmostEqual(spent, pe.STAKE, places=9, msg="one signal, one stake")
+        self._assert_invariants(c, "replayed signal")
+
+
 class ReEntryTests(unittest.TestCase):
     """paper_positions.token_mint is a PRIMARY KEY, so a token traded once leaves a
     closed row behind. Re-entering it after the cooldown used to raise IntegrityError,

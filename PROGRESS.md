@@ -528,3 +528,57 @@ The bind guard (#43) was checked directly: `--host 0.0.0.0` without auth exits w
 findings, two of them high severity, and one was a bug in code written during this
 work rather than inherited. That is the argument for the stopping condition: four
 passes in, a fresh read still turns up a corrupt credential. Pass 5 remains.
+
+## Pass 5 — 2026-07-26
+
+A different lens: instead of re-reading, cross-check the code against its own
+documentation, and check accounting properties against the live database.
+
+### Found and fixed
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 49 | Medium | The code reads 30 environment variables; `.env.example` documented 19. Most of the missing ones were added during this hardening work — a knob nobody can discover is a knob that does not exist | All documented, grouped by effect, with real defaults; three tests now enforce it | `3787717` |
+
+### Verification
+
+```
+$ python -m unittest test_paper_engine
+Ran 127 tests in 9.246s
+OK
+```
+
+Four accounting invariants were checked against the live database and all held:
+
+| Invariant | Result |
+|---|---|
+| `balance + open stakes == initial + realised` | 0.03886266 vs 0.03886266, diff 1.4e-17 |
+| `entries − exits == open positions` | 12 − 11 = 1, open 1 |
+| every open position's latest trade is its `ENTRY` | no offenders |
+| no negative balance, no non-positive or inverted prices | 0 offenders |
+
+They are now pinned by `AccountingInvariantTests`, which drives a synthetic sequence
+through entry, hard stop, re-entry, trailing stop and max-hold expiry, asserting the
+invariants after each step.
+
+Two tests written this pass were themselves verified by deliberately breaking the
+code and confirming they fail:
+
+- Changing the exit payout to `stake + pnl*0.9` produced
+  `money is not conserved after winning exit`.
+- Changing a documented default produced
+  `GMGN_CLI_TIMEOUT: example says '999', code uses '45'`.
+
+Both were reverted and the working tree confirmed clean against git.
+
+Writing the documentation test also caught a bug in its own first version: the regex
+stopped at the first comma, so a quoted default containing one
+(`TUNNEL_PROTOCOLS="quic,http2"`) was compared as `"quic"`.
+
+### Still open
+
+`ISSUES.md` unchanged.
+
+**Confidence that `gmgn/` is production-ready: high.** Pass 5 found one issue, so it
+was not clean either. The stopping condition needs two consecutive passes with
+nothing worth fixing; Pass 6 follows.
