@@ -35,6 +35,20 @@ def fresh_db():
     return c
 
 
+class _NonClosing:
+    """Wraps a shared connection so code that calls .close() in a finally block does
+    not tear down an in-memory database the test still needs."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def close(self):
+        pass
+
+
 class PaperEngineTests(unittest.TestCase):
     def setUp(self):
         self._token_price = pe.token_price
@@ -719,6 +733,42 @@ class WebappPositionTests(unittest.TestCase):
         self.assertEqual(set(merged), {"a", "c"}, "a closed position must not linger")
         self.assertEqual(merged["a"], 1.1)
         self.assertEqual(merged["c"], 0.0)
+
+    def test_equity_curve_follows_the_most_recent_trades(self):
+        # Regression: `ORDER BY id LIMIT ?` returned the *oldest* N, so once the journal
+        # grew past the limit the chart froze on early history and never moved again.
+        import webapp
+        c = fresh_db()
+        for i in range(10):
+            c.execute("INSERT INTO paper_trades(token_mint,chain,action,price,stake_sol,pnl_sol,"
+                      "pnl_pct,reason,wallet_count,signal_score,event_ts) "
+                      "VALUES(?,'sol','EXIT',1.0,0.025,?,0,'t',1,1.0,?)",
+                      (MINT_A, 0.001, NOW + i))
+        self._patch_db(c)
+
+        curve = webapp.api_equity_curve(limit=3)["curve"]
+        self.assertEqual(len(curve), 4, "one opening point plus the last three trades")
+        # Opening value folds in the seven trades before the window.
+        self.assertAlmostEqual(curve[0]["equity"], 0.1 + 7 * 0.001)
+        self.assertAlmostEqual(curve[-1]["equity"], 0.1 + 10 * 0.001,
+                               msg="the curve must end at the true realised equity")
+        self.assertTrue(webapp.api_equity_curve(limit=3)["truncated"])
+
+    def test_equity_curve_with_no_trades(self):
+        import webapp
+        c = fresh_db()
+        self._patch_db(c)
+        curve = webapp.api_equity_curve()["curve"]
+        self.assertEqual(len(curve), 1)
+        self.assertAlmostEqual(curve[0]["equity"], 0.1)
+
+    def _patch_db(self, conn):
+        """Point webapp.db() at an in-memory connection for the duration of the test."""
+        import webapp
+        conn.row_factory = sqlite3.Row
+        original = webapp.db
+        webapp.db = lambda: _NonClosing(conn)
+        self.addCleanup(lambda: setattr(webapp, "db", original))
 
     def test_failed_refresh_keeps_the_previous_mark(self):
         merged = self.webapp.merge_marks(["a"], {"a": 5.0}, {})

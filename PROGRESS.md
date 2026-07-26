@@ -329,3 +329,75 @@ to value a delisted position.
 **Confidence that `gmgn/` is production-ready: medium.** The crash paths that
 cost real money are fixed and pinned by tests, but this is one pass, and passes 2+
 have not yet run.
+
+## Pass 2 — 2026-07-26
+
+Read end to end: `tunnel.py`, `mass_discovery.py`, `monitor.py`, plus a re-read of
+everything changed in Pass 1.
+
+### Found and fixed
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 22 | High | `gmgn_cli` ran the subprocess with `text=True`, decoding with the locale codec. On this cp1251 machine any emoji or CJK character in a token name raised `UnicodeDecodeError` — on the engine's main API path | Explicit `encoding="utf-8", errors="replace"` | `f7e87e2` |
+| 23 | High | `mass_discovery` spawned `gmgn-cli` with no `env=`, so it used machine-wide credentials rather than the project's `.env` — contrary to the requirement that every API key stay local | Shares `gmgn_cli()` with the engine | `f7e87e2` |
+| 24 | High | Win rate arriving under the `win_rate` spelling was never scaled: `"winrate" in "win_rate"` is `False`, so 75% parsed as `75.0`, clearing the ≥0.90 elite gate and rendering as 7500% | Underscore-insensitive check; out-of-range values refused | `c677c24` |
+| 25 | Medium | A tunnel reader thread from a previous attempt could publish its dead hostname after a newer attempt cleared it — cloudflared is tried once per protocol, so this was the normal path | Per-spawn generation token | `f7e87e2` |
+| 26 | Medium | Tunnel readiness was inferred from a log line, which the module's own docstring records as unreliable (HTTP 530) | URL probed against `/api/health` before publication | `f7e87e2` |
+| 27 | Medium | `api_equity_curve` used `ORDER BY id LIMIT ?`, taking the *oldest* N trades, so past the limit the chart froze on early history | Takes the tail; pre-window trades folded into the opening value | this pass |
+| 28 | Medium | `monitor.py` invoked a bare `gmgn-cli` (unresolvable by CreateProcess on Windows), decoded with the locale codec, and used machine-wide credentials | Shares `gmgn_cli()`; tunables via `config.py` | `c677c24` |
+| 29 | Medium | `active=0` (parked) was introduced in Pass 1 but nothing surfaced it, so the pool could shrink invisibly | Reported in `/wallets` and the panel; `wallets_active` renamed `wallets_qualified` | `c677c24` |
+| 30 | Medium | Addresses were not validated in `mass_discovery`, though its output is a committed file | `valid_address` on feed and seed input | `f7e87e2` |
+| 31 | Low | `_cli_retry(retries=0)` would `raise None` | Guarded | `f7e87e2` |
+| 32 | Low | No progress output during the long stats phase, so a full run was indistinguishable from a hang | Periodic progress line | `f7e87e2` |
+| 33 | Low | README claimed `mass_discovery` "applies the 7-day activity gate"; its default is 0, so it does not | Both README and docstring state each gate's real default | `f7e87e2` |
+
+### Verification
+
+```
+$ python -m unittest test_paper_engine
+Ran 94 tests in 5.300s
+OK
+```
+
+The decoding bug (#22) was found by running `mass_discovery` against the live API,
+not by reading: three feed calls died and the run yielded 1 qualified wallet.
+After the fix the same command yields 4. The engine issues that call every poll.
+
+Full stack run with the tunnel, and the new probe earned its place immediately:
+
+```
+INFO  tunnel reports ready: https://jgmta-...free.pinggy.net
+WARN  https://jgmta-...free.pinggy.net never served a request
+      ([SSL: DECRYPTION_FAILED_OR_BAD_RECORD_MAC]) — treating as failed
+INFO  tunnel reports ready: https://hrqqr-...run.pinggy-free.link
+INFO  Mini App published at https://hrqqr-...run.pinggy-free.link
+INFO  restarting webapp as requested
+INFO  mini app on http://127.0.0.1:8770 (auth required)
+```
+
+The first URL was live by the provider's own account and did not serve; before this
+pass it would have become the Mini App button. The second passed and was published.
+`restarting webapp as requested` is the Pass 1 expected-restart fix, visible in
+production rather than only in a harness.
+
+Auth checked from outside, through the public origin:
+
+| Endpoint | Result |
+|---|---|
+| `/api/health` | 200 — unauthenticated by design; the probe uses it |
+| `/api/overview`, `/api/trades`, `/api/wallets` | 401 |
+| `/api/overview` with forged `initData` | 401 |
+| `/` (static page) | 200 |
+
+Equity curve cross-checked against the account: ends at 0.03886 = initial +
+realised, at `limit=300` and at `limit=2`, where it correctly reports `truncated`.
+
+### Still open
+
+`ISSUES.md` is unchanged: the same four items, all needing an operator decision.
+
+**Confidence that `gmgn/` is production-ready: medium-high.** Pass 2 found three
+high-severity bugs, two of them only visible by running against the live API rather
+than reading — which is why the stopping condition is two consecutive clean passes,
+not one. Pass 3 has not yet run.

@@ -340,19 +340,31 @@ def api_events(limit: int = 60) -> dict:
 
 
 def api_equity_curve(limit: int = 200) -> dict:
-    """Reconstruct the equity curve from closed trades, oldest first."""
+    """Equity after each of the most recent `limit` closed trades, oldest first.
+
+    `ORDER BY id LIMIT ?` took the *oldest* N, so once the journal passed the limit the
+    chart froze on early history and never showed a recent trade again. Taking the tail
+    means the curve cannot start from initial_budget_sol, so the trades before the
+    window are folded into the opening value.
+    """
     c = db()
     try:
         a = c.execute("SELECT initial_budget_sol FROM paper_account WHERE id=1").fetchone()
-        equity = a["initial_budget_sol"] if a else 0.0
+        initial = a["initial_budget_sol"] if a else 0.0
+        realised = c.execute(
+            "SELECT COALESCE(SUM(pnl_sol),0) FROM paper_trades WHERE action='EXIT'").fetchone()[0]
         rows = c.execute(
-            "SELECT pnl_sol,event_ts FROM paper_trades WHERE action='EXIT' ORDER BY id LIMIT ?", (limit,)
-        ).fetchall()
-        points = [{"ts": rows[0]["event_ts"] if rows else int(time.time()), "equity": equity}]
+            "SELECT pnl_sol,event_ts FROM paper_trades WHERE action='EXIT' ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()[::-1]
+        if not rows:
+            return {"curve": [{"ts": int(time.time()), "equity": initial}]}
+        equity = initial + realised - sum(r["pnl_sol"] for r in rows)
+        points = [{"ts": rows[0]["event_ts"], "equity": equity}]
         for r in rows:
             equity += r["pnl_sol"]
             points.append({"ts": r["event_ts"], "equity": equity})
-        return {"curve": points}
+        return {"curve": points, "truncated": len(rows) == limit}
     finally:
         c.close()
 
