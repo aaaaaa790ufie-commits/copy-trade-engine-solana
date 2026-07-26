@@ -2607,6 +2607,35 @@ class ConfigParsingTests(unittest.TestCase):
         got = self._parse('TOKEN="abc#def"\n')
         self.assertEqual(got["TOKEN"], "abc#def")
 
+    def test_trailing_comment_after_a_quoted_value(self):
+        # This is the exact shape .env.example documents every tunable in, so
+        # uncommenting one is the intended way to use the file:
+        #   # GMGN_ELITE_CALLOUTS_MAX="10"    # cap on MISSED reports per cycle
+        # The closing quote used to be looked for at end-of-line, so this read as an
+        # unterminated quote and consumed lines until one happened to end in a quote.
+        got = self._parse('A="10"      # cap on reports\nWEBAPP_HOST="127.0.0.1"\nB=2\n')
+        self.assertEqual(got["A"], "10")
+        self.assertEqual(got["WEBAPP_HOST"], "127.0.0.1",
+                         "the setting below must not be swallowed by the comment above")
+        self.assertEqual(got["B"], "2")
+
+    def test_every_commented_setting_in_env_example_parses_when_uncommented(self):
+        # The template and the parser have to agree, or the documentation is a trap.
+        example = (pathlib.Path(config.ROOT) / ".env.example").read_text(encoding="utf-8")
+        uncommented, expected = [], 0
+        for line in example.splitlines():
+            body = line.lstrip("# ").rstrip()
+            if line.lstrip().startswith("#") and "=" in body and body.split("=")[0].isupper():
+                uncommented.append(body)
+                expected += 1
+        self.assertGreater(expected, 20, "the template should document many tunables")
+        got = self._parse("\n".join(uncommented) + "\n")
+        self.assertEqual(len(got), expected,
+                         "every documented line must parse to exactly one setting")
+        for key, value in got.items():
+            self.assertNotIn("#", value, f"{key} kept its trailing comment")
+            self.assertNotIn("\n", value, f"{key} swallowed the following line")
+
     def test_value_may_contain_equals(self):
         got = self._parse("URL=https://x/y?a=b\n")
         self.assertEqual(got["URL"], "https://x/y?a=b")
@@ -2804,6 +2833,166 @@ class InitDataTests(unittest.TestCase):
 
     def test_empty_rejected(self):
         self.assertIsNone(self.webapp.verify_init_data(""))
+
+
+class FakeProc:
+    """Just enough of subprocess.Popen for the supervision loop."""
+
+    def __init__(self):
+        self.returncode = None
+
+    def poll(self):
+        return self.returncode
+
+    def die(self, code=1):
+        self.returncode = code
+
+
+class SupervisorTests(unittest.TestCase):
+    """One pass of the loop, driven by an explicit clock so no test ever sleeps.
+
+    supervisor.py had no coverage at all, which is how the blocking backoff below
+    survived: the engine's downtime is the whole point of the file, and a bug that
+    lengthened it was invisible.
+    """
+
+    def setUp(self):
+        import supervisor
+        self.sup = supervisor
+        self.starts = []
+
+    def _child(self, name):
+        ch = self.sup.Child(name, ["noop"])
+
+        def start(_ch=ch):
+            self.starts.append(_ch.name)
+            _ch.proc = FakeProc()
+
+        ch.start = start
+        ch.start()
+        return ch
+
+    def _run(self, children, started, now):
+        self.starts.clear()
+        return self.sup.supervise_once(children, started, now)
+
+    def test_a_child_in_backoff_does_not_delay_the_others(self):
+        # The regression: the bot waiting out its backoff used to suspend the engine
+        # check entirely, so an engine crash went unnoticed for up to MAX_BACKOFF.
+        engine, bot = self._child("engine"), self._child("bot")
+        # The bot is mid-flap: up only a moment, so its climbed backoff is not reset.
+        started = {"engine": 0.0, "bot": 999.0}
+        bot.backoff = self.sup.MAX_BACKOFF
+
+        bot.proc.die()
+        self._run([engine, bot], started, 1000.0)
+        self.assertEqual(bot.restart_at, 1000.0 + self.sup.MAX_BACKOFF)
+
+        # Engine dies one second into the bot's two-minute wait.
+        engine.proc.die()
+        self._run([engine, bot], started, 1001.0)          # notices, schedules
+        self.assertEqual(self._run([engine, bot], started, 1001.0 + self.sup.MIN_BACKOFF),
+                         ["engine"])
+        self.assertLess(self.sup.MIN_BACKOFF, self.sup.MAX_BACKOFF)  # the point of the test
+
+    def test_backoff_doubles_up_to_the_ceiling(self):
+        ch = self._child("bot")
+        started, now = {"bot": 0.0}, 100.0
+        seen = []
+        for _ in range(9):
+            ch.proc.die()
+            self._run([ch], started, now)
+            seen.append(int(ch.restart_at - now))
+            now = ch.restart_at
+            self._run([ch], started, now)   # due: restarts, uptime stays under HEALTHY_AFTER
+        self.assertEqual(seen, [3, 6, 12, 24, 48, 96, 120, 120, 120])
+
+    def test_surviving_long_enough_resets_the_backoff(self):
+        ch = self._child("bot")
+        started = {"bot": 0.0}
+        ch.backoff = self.sup.MAX_BACKOFF
+        ch.proc.die()
+        self._run([ch], started, self.sup.HEALTHY_AFTER + 1)
+        self.assertEqual(ch.restart_at, self.sup.HEALTHY_AFTER + 1 + self.sup.MIN_BACKOFF)
+
+    def test_expected_exit_restarts_at_once_and_keeps_the_backoff(self):
+        # publish() stops the bot to hand it a new tunnel hostname. That is not a crash:
+        # counting it would push a healthy bot up the backoff ladder every hour, when a
+        # free pinggy session expires.
+        ch = self._child("bot")
+        ch.expected_exit = True
+        ch.proc.die(0)
+        self.assertEqual(self._run([ch], {"bot": 0.0}, 500.0), ["bot"])
+        self.assertEqual(ch.restarts, 0)
+        self.assertEqual(ch.backoff, self.sup.MIN_BACKOFF)
+        self.assertFalse(ch.expected_exit)
+
+    def test_stopping_an_already_dead_child_does_not_excuse_its_crash(self):
+        ch = self._child("bot")
+        ch.proc.die()
+        ch.stop(expected=True)          # publish() racing a crash
+        self.assertFalse(ch.expected_exit)
+        self._run([ch], {"bot": 0.0}, 10.0)
+        self.assertEqual(ch.restarts, 1)   # counted as the crash it was
+
+    def test_a_running_child_is_left_alone(self):
+        ch = self._child("engine")
+        self.assertEqual(self._run([ch], {"engine": 0.0}, 9999.0), [])
+        self.assertEqual(ch.restarts, 0)
+
+    def test_the_local_server_is_waited_for_before_the_tunnel_is_started(self):
+        # The tunnel probes its own public URL for a 200 before publishing it, so the
+        # webapp has to be listening first. Bringing the tunnel up ahead of the children
+        # meant that probe hit an empty port on every clean boot.
+        order, published = [], []
+        tun = self._fake_tunnel(order, url="https://x.example")
+        self.sup.bring_up_tunnel(tun, 8770, published.append,
+                                 wait=lambda p, **kw: (order.append("wait"), True)[1])
+        self.assertEqual(order, ["wait", "start", "watch"])
+        self.assertEqual(published, ["https://x.example"])
+
+    def test_a_failed_first_attempt_still_gets_a_watcher(self):
+        # Nothing else retries, and nothing else renews a pinggy session when the free
+        # hour runs out.
+        order, published = [], []
+        tun = self._fake_tunnel(order, url="")
+        self.sup.bring_up_tunnel(tun, 8770, published.append, wait=lambda p, **kw: True)
+        self.assertEqual(order, ["start", "watch"])
+        self.assertEqual(published, [])
+
+    def test_a_slow_server_does_not_stop_the_attempt(self):
+        # wait() timing out is a reason to warn, not to skip publishing: the webapp may
+        # simply be slower than the timeout, and watch() would have to redo the work.
+        order, published = [], []
+        tun = self._fake_tunnel(order, url="https://x.example")
+        self.sup.bring_up_tunnel(tun, 8770, published.append, wait=lambda p, **kw: False)
+        self.assertEqual(order, ["start", "watch"])
+        self.assertEqual(published, ["https://x.example"])
+
+    @staticmethod
+    def _fake_tunnel(order, url):
+        class FakeTunnel:
+            def __init__(self):
+                self.url = ""
+
+            def start(self):
+                order.append("start")
+                self.url = url
+                return url
+
+            def watch(self, on_url):
+                order.append("watch")
+
+        return FakeTunnel()
+
+    def test_one_crash_is_counted_once_however_many_passes_it_spans(self):
+        ch = self._child("engine")
+        started = {"engine": 0.0}
+        ch.proc.die()
+        for now in (10.0, 10.5, 11.0, 11.5):
+            self._run([ch], started, now)
+        self.assertEqual(ch.restarts, 1)
+        self.assertEqual(ch.backoff, self.sup.MIN_BACKOFF * 2)
 
 
 if __name__ == '__main__':

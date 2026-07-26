@@ -58,8 +58,14 @@ def _parse_env_file(path: Path) -> dict[str, str]:
         value = value.strip()
         quote = value[0] if value[:1] in ("'", '"') else ""
         if quote:
-            if len(value) >= 2 and value[-1] == quote:
-                value = value[1:-1]
+            closing = value.find(quote, 1)
+            if closing != -1:
+                # Up to the closing quote, not to the end of the line. Testing `value[-1]`
+                # instead meant `KEY="10"  # why` read as an *unterminated* quote and went
+                # hunting for a closing line — swallowing whatever came next. Nearly every
+                # tunable in .env.example is documented in exactly that shape, so
+                # uncommenting one silently deleted the setting below it.
+                value = value[1:closing]
             else:
                 # Opening quote with no closing one: keep taking raw lines until it closes.
                 parts = [value[1:]]
