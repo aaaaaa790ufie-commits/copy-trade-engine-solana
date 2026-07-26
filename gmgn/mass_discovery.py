@@ -40,13 +40,21 @@ def cli(args: list[str]) -> Any:
     return gmgn_cli(args, timeout=CLI_TIMEOUT)
 
 def _cli_retry(args: list[str], retries: int = 3, delay: float = 1.0) -> Any:
+    """Retry a gmgn-cli call. Any failure of the subprocess is retryable.
+
+    This caught only RuntimeError, which gmgn_cli raises for a non-zero exit or
+    unparsable output. A *hung* CLI raises subprocess.TimeoutExpired, which is a
+    SubprocessError and not a RuntimeError — so the one failure mode a retry exists for
+    was the one it did not retry, and it propagated out of the first two unguarded calls
+    in discover_candidates and ended the run before it had collected anything.
+    """
     last_err: Exception | None = None
     for attempt in range(max(1, retries)):
         try:
             return cli(args)
-        except RuntimeError as e:
+        except Exception as e:
             last_err = e
-            LOG.warning("cli attempt %d/%d failed: %s", attempt + 1, retries, e)
+            LOG.warning("cli attempt %d/%d failed: %s: %s", attempt + 1, retries, type(e).__name__, e)
             time.sleep(delay * (attempt + 1))
     raise last_err if last_err else RuntimeError(f"gmgn-cli produced no result for {args[:2]}")
 
@@ -119,10 +127,15 @@ def discover_candidates(args: argparse.Namespace) -> dict[str, set[str]]:
             if wallet:
                 candidates[wallet].add(source)
 
-    add("smartmoney", _cli_retry(["track", "smartmoney", "--chain", "sol", "--limit", str(args.feed_limit)]))
-    time.sleep(args.delay)
-    add("kol", _cli_retry(["track", "kol", "--chain", "sol", "--limit", str(args.feed_limit)]))
-    time.sleep(args.delay)
+    # Guarded like every other feed below. These two were the only bare calls, so one
+    # exhausted retry ended a run that the remaining feeds and the seed file could still
+    # have made useful.
+    for source, argv in (("smartmoney", ["track", "smartmoney"]), ("kol", ["track", "kol"])):
+        try:
+            add(source, _cli_retry([*argv, "--chain", "sol", "--limit", str(args.feed_limit)]))
+        except Exception as exc:
+            LOG.warning("%s feed unavailable: %s", source, exc)
+        time.sleep(args.delay)
 
     token_ids: set[str] = set()
     for interval in ("5m", "1h", "6h", "24h"):
@@ -247,6 +260,10 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
+    # The only entrypoint that was missing this. Its log lines carry gmgn-cli's stderr
+    # and %r of feed and file data, so one non-ASCII byte on a cp1251 console killed a
+    # run that takes thousands of API calls to reach that point.
+    config.use_utf8_stdio()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     candidates = discover_candidates(args)
     for wallet, sources in load_seeds(args.seed_file).items():

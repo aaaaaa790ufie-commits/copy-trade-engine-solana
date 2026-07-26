@@ -2715,6 +2715,24 @@ class ConfigParsingTests(unittest.TestCase):
         got = self._parse("URL=https://x/y?a=b\n")
         self.assertEqual(got["URL"], "https://x/y?a=b")
 
+    def test_every_entrypoint_sets_up_utf8_stdio(self):
+        # Logs and Telegram text are Russian with emoji, and API errors arrive as
+        # whatever the remote sent. Without this the first such line raises
+        # UnicodeEncodeError on a cp1251 console and takes the process with it.
+        # mass_discovery.py was the one that had never called it, and it is the one
+        # whose run takes thousands of API calls to reach the line that would kill it.
+        root = pathlib.Path(config.ROOT) / "gmgn"
+        missing = []
+        for path in sorted(root.glob("*.py")):
+            if path.name.startswith("test_"):
+                continue
+            source = path.read_text(encoding="utf-8")
+            if "def main(" not in source:
+                continue
+            if "use_utf8_stdio()" not in source:
+                missing.append(path.name)
+        self.assertEqual(missing, [], "these entrypoints would die on a cp1251 console")
+
     def test_missing_file_is_empty_not_an_error(self):
         self.assertEqual(config._parse_env_file(pathlib.Path("no-such-file.env")), {})
 
@@ -2921,6 +2939,51 @@ class FakeProc:
 
     def die(self, code=1):
         self.returncode = code
+
+
+class MonitorTests(unittest.TestCase):
+    """The legacy signal producer. It writes to the same database the engine imports
+    from, so what it persists still matters even though nothing runs it today."""
+
+    def setUp(self):
+        import monitor
+        self.monitor = monitor
+        self._run_cli = monitor.run_cli
+        self.addCleanup(lambda: setattr(monitor, "run_cli", self._run_cli))
+
+    def _feed(self, rows):
+        self.monitor.run_cli = lambda args: (
+            {"data": {"list": rows}} if args[:2] == ["track", "smartmoney"] else {"data": {"list": []}})
+
+    def test_a_malformed_maker_never_reaches_the_database(self):
+        # wallet_scores is one of run_engine's LEGACY_SOURCES, so anything landing here
+        # is offered to wallet_watch on the next start. The validation added in Pass 2
+        # covered wallet_address(), which parses the stats *response* — the feed rows
+        # persisted by produce_signals went straight through unchecked.
+        c = fresh_db()
+        self.monitor.init_db(c)
+        now = int(time.time())
+        self._feed([
+            {"maker": "<img src=x onerror=alert(1)>", "base_address": MINT_A,
+             "timestamp": now, "side": "buy"},
+            {"maker": WALLET_A, "base_address": "'; DROP TABLE wallet_scores; --",
+             "timestamp": now, "side": "buy"},
+        ])
+        self.monitor.produce_signals(c)
+
+        stored = [r[0] for r in c.execute("SELECT wallet_address FROM wallet_scores")]
+        self.assertEqual(stored, [], "no unvalidated address may be persisted")
+
+    def test_a_well_formed_row_still_gets_through(self):
+        # The guard has to reject junk without rejecting everything.
+        c = fresh_db()
+        self.monitor.init_db(c)
+        self._feed([{"maker": WALLET_A, "base_address": MINT_A,
+                     "timestamp": int(time.time()), "side": "buy"}])
+        self.monitor.produce_signals(c)
+
+        stored = [r[0] for r in c.execute("SELECT wallet_address FROM wallet_scores")]
+        self.assertEqual(stored, [WALLET_A])
 
 
 class SupervisorTests(unittest.TestCase):

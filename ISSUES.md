@@ -156,3 +156,41 @@ admit every token on that chain if enabled.
 
 **Not done automatically because** removing it would drop a feature someone may
 intend to use; verifying it needs a working robinhood API key and live data.
+
+---
+
+## 7. Most of the repository is not part of the documented project
+
+**Status:** open. Needs a scope decision from the operator — I will not delete code
+on an inference.
+
+`CLAUDE.md` documents `gmgn/` and nothing else. The repository also contains a Rust
+workspace (`Cargo.toml`, `src/`, `ingest/`, `filter/`, `scorer/`, `risk/`, `executor/`,
+`position_mgr/`, `telemetry/`) and several Python components that predate it. None of it
+is started by `supervisor.py`, referenced by the engine, or covered by the test suite.
+
+What was established rather than assumed:
+
+| Component | Evidence about whether it is live |
+|---|---|
+| `gmgn/monitor.py` | Writes `gmgn_signals` for "the Rust engine". That table **does not exist** in `sentinel.db` — it has never run against this database |
+| `dashboard/app.py` | Needs `streamlit`, which is **not installed**; the project is otherwise stdlib-only. Reads `candidate_wallets`, `discovered_tokens`, `wallet_trades`. Its "System Status" panel is a hardcoded string, not real state |
+| `discovery/`, `scorer/` | Populate the legacy tables. `wallet_trades` and `wallet_scores_v2` are **empty**; `candidate_wallets` 13 rows, `discovered_tokens` 21, `wallet_scores` 17 — all stale |
+| Rust workspace | Not built or invoked anywhere in this project's workflow |
+
+The one live coupling: `run_engine.import_old_wallets` reads `wallet_scores` and
+`candidate_wallets` into `wallet_watch` on every start. It logged `imported 0 wallets`
+on the last boot, because everything importable is already there. Addresses are
+validated by `_admit`, so the legacy tables cannot inject anything malformed.
+
+**Cost of leaving it:** no runtime cost. The cost is to review — the dead code is
+indistinguishable from live code at a glance, and it is why `monitor.py` went twenty-one
+passes without being read. Two real defects were found in it on first reading (see
+Pass 22), in a file nothing runs.
+
+**What I did anyway:** fixed those defects rather than leaving known-broken code in
+place, on the grounds that "probably dead" is not "dead".
+
+**The decision:** whether to delete the legacy tree, move it to an `archive/` branch, or
+keep and document it. Deleting is right if the Rust engine is abandoned; it is wrong if
+it is a parallel effort. That is not something the code can tell me.

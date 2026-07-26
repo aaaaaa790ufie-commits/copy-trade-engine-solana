@@ -28,7 +28,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
 from paper_engine import _find_gmgn as pe_find_gmgn  # noqa: E402
-from paper_engine import _is_winrate_key, gmgn_cli, valid_address  # noqa: E402
+from paper_engine import _is_winrate_key, gmgn_cli, mint as token_address, valid_address  # noqa: E402
 
 LOG = logging.getLogger("gmgn-monitor")
 # Read through config.py so the repo-local .env applies here too, rather than requiring
@@ -238,13 +238,17 @@ def produce_signals(conn: sqlite3.Connection) -> int:
     payload = run_cli(["track", "smartmoney", "--chain", "sol", "--limit", str(FEED_LIMIT)])
     trades = as_list(payload)
     cutoff = int(time.time()) - WINDOW_SECONDS
-    recent = [
-        trade
-        for trade in trades
-        if int(number(trade, "timestamp")) >= cutoff
-        and trade.get("maker")
-        and trade.get("base_address")
-    ]
+    # Validated here, not merely truthy. `maker` and `base_address` are written straight
+    # into wallet_scores and gmgn_signals below, and run_engine imports wallet_scores.
+    # The validation added in Pass 2 reached wallet_address(), which only ever parsed the
+    # stats *response* — the feed rows persisted from this function went unchecked.
+    recent = []
+    for trade in trades:
+        if int(number(trade, "timestamp")) < cutoff:
+            continue
+        maker, token = wallet_address(trade), token_address(trade)
+        if maker and token:
+            recent.append(trade | {"maker": maker, "base_address": token})
     makers = sorted({str(trade["maker"]) for trade in recent})
     stats_by_wallet = fetch_stats(makers)
     good = {wallet for wallet, stats in stats_by_wallet.items() if qualifies(stats)}
@@ -335,6 +339,7 @@ def main() -> int:
         self_test()
         return 0
 
+    config.use_utf8_stdio()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     ensure_configured()
     conn = sqlite3.connect(args.db_path, timeout=30)
