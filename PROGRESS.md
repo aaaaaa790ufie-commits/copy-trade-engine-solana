@@ -879,3 +879,39 @@ OK
 ```
 
 **Pass 12 was not clean.** Findings per pass: 21, 12, 7, 8, 1, 1, 1, 3, 0, 1, 1, 2.
+
+## Pass 13 — 2026-07-26 — **clean**
+
+Lens: resource lifecycle, dead and unreachable code, and whether the filters added in
+earlier passes can actually fire against real API data.
+
+### Nothing found worth fixing
+
+| Checked | Result |
+|---|---|
+| Every `sqlite3.connect` — closed, and on the failure path? | Two flagged, both correct by design: `webapp.db()` is a factory whose callers close, and the bot holds one read-only connection for the process lifetime (on Windows `terminate()` runs no cleanup regardless). Recorded rather than changed |
+| `TODO` / `FIXME` / `XXX` / `HACK` / `WIP` markers | None |
+| Unreachable statements after `return`/`raise`/`continue`/`break` | None |
+| Functions defined but never referenced | None |
+| Live accounting invariants | Money conserved to 1e-17, 12 entries − 11 exits = 1 open, no bad prices, no win rate above 1, no address outside 32–44 chars |
+| Live stack end to end | Page 200, `/api/health` 200, `/api/overview` 401 through the public origin; `/status` reports `🟢 LIVE`, last cycle 14 s ago |
+
+### Worth recording
+
+The wallet-parking filter added in Pass 1 shows zero parked wallets, which raised the
+question of whether it can fire at all. Sampling live stats shows it can: GMGN does
+populate `buy` and `sell` (162 and 146 for the wallet sampled), so a dormant wallet
+with `buy=0` would be parked, and a trading one correctly is not. The filter is
+selective, not dead.
+
+The same sample showed the win rate arriving as `pnl_stat.winrate` — the *third*
+fallback key, not the first. The Pass 2 fix to underscore-insensitive matching is
+therefore guarding a path that is genuinely in use, not a hypothetical one.
+
+```
+$ python -m unittest discover -s gmgn -p 'test_*.py'
+Ran 138 tests in 10.046s
+OK
+```
+
+**Clean.** One consecutive clean pass; one more is required.
