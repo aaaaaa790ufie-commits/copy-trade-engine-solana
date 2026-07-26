@@ -846,3 +846,36 @@ to this one seam.
 
 **Pass 11 was not clean.** Two consecutive clean passes are still required; the run
 currently stands at zero.
+
+## Pass 12 — 2026-07-26
+
+Lens: attack the seam Pass 11 named. An AST sweep for function names and SQL strings
+appearing in more than one module, to find every remaining place a rule is
+implemented twice.
+
+### Found and fixed
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 57 | Medium | `monitor.wallet_address` was missed when address validation was added in Pass 2. It accepted `<img src=x onerror=alert(1)>` verbatim and wrote it to SQLite | Validates, like the other three extractors | `27bfc62` |
+| 58 | Low | `SELECT updated_at FROM engine_state WHERE key='last_cycle'` appeared in three modules, each with its own pre-heartbeat fallback | `pe.last_cycle_ts` owns it; webapp and the bot delegate. Verified identical against the live database | `27bfc62` |
+
+Both come with a test that **enumerates every implementation** rather than checking
+one, so a fifth extractor or a fourth win-rate parser has to be added to the list to
+be trusted. Patching each instance as it surfaces does not stop the class recurring;
+this does.
+
+### Swept and deliberately left alone
+
+`mass_discovery` and `monitor` still each define `unwrap`, `qualifies` and
+`fetch_stats`. These are not duplicates — the discovery tool's quality gate is not the
+signal producer's, and merging them would be a worse bug than the repetition. Recorded
+so a later pass does not mistake them for unfinished work.
+
+```
+$ python -m unittest discover -s gmgn -p 'test_*.py'
+Ran 138 tests in 9.632s
+OK
+```
+
+**Pass 12 was not clean.** Findings per pass: 21, 12, 7, 8, 1, 1, 1, 3, 0, 1, 1, 2.
