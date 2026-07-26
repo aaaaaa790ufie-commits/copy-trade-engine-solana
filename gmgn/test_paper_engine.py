@@ -523,6 +523,50 @@ class MissedSignalTests(unittest.TestCase):
         pe.missed_elite_signals(c, "sol", [self._buy(WALLET_A, MINT_A, NOW)], NOW, since=NOW - 10)
         self.assertEqual(self._missed(c), [])
 
+    def test_a_signal_acted_on_this_cycle_is_not_reported_as_missed(self):
+        """The exact order cycle() runs: enter() first, then the missed report.
+
+        missed_elite_signals reads open positions after enter() has run, so a mint just
+        opened is already "open" — it was reported as "уже в позиции" alongside the ENTRY
+        event raised moments earlier for the same buy. Every successful elite entry
+        produced a contradictory notification.
+        """
+        c = fresh_db()
+        self._seed_elite(c)
+        saved = pe.token_price
+        pe.token_price = lambda ch, m: 1.0
+        try:
+            trades = [self._buy(WALLET_A, MINT_A, NOW)]
+            winrates = pe.cached_winrates(c, "sol")
+            opened = pe.enter(c, "sol", trades, pe.weights_from(winrates), NOW, winrates)
+            self.assertEqual(opened, {MINT_A}, "enter() must report what it opened")
+            pe.missed_elite_signals(c, "sol", trades, NOW, NOW - 10, opened)
+        finally:
+            pe.token_price = saved
+
+        kinds = [r[0] for r in c.execute("SELECT kind FROM engine_events")]
+        self.assertIn("ENTRY", kinds)
+        self.assertNotIn("MISSED", kinds, "one buy must not be both taken and missed")
+
+    def test_a_genuinely_blocked_signal_is_still_reported(self):
+        # The exclusion must not silence the reports the feature exists for.
+        c = fresh_db()
+        self._seed_elite(c)
+        c.execute("INSERT INTO paper_cooldowns VALUES(?,?,?)", (MINT_A, "sol", NOW + 300))
+        saved = pe.token_price
+        pe.token_price = lambda ch, m: 1.0
+        try:
+            trades = [self._buy(WALLET_A, MINT_A, NOW)]
+            winrates = pe.cached_winrates(c, "sol")
+            opened = pe.enter(c, "sol", trades, pe.weights_from(winrates), NOW, winrates)
+            self.assertEqual(opened, set(), "the cooldown blocked it")
+            pe.missed_elite_signals(c, "sol", trades, NOW, NOW - 10, opened)
+        finally:
+            pe.token_price = saved
+
+        self.assertEqual(len(self._missed(c)), 1)
+        self.assertIn("кулдаун", self._missed(c)[0])
+
     def test_cooldown_is_reported(self):
         c = fresh_db()
         self._seed_elite(c)

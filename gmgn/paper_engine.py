@@ -281,8 +281,9 @@ def score_of(ws,weights):
  buys={w:t for w,t in ws.items() if quote(t)=="buy"}
  return buys,sum(weights[w] for w in buys)
 def enter(c,chain,trades,weights,now,winrates=None):
+ """Open positions for every mint whose cluster reaches ENTRY. Returns the mints opened."""
  winrates=winrates if winrates is not None else cached_winrates(c,chain)
- latest=cluster(chain,trades,weights,now)
+ latest=cluster(chain,trades,weights,now); opened=set()
  open_mints={r[0] for r in c.execute("SELECT token_mint FROM paper_positions WHERE status='open'")}
  for m,ws in latest.items():
   buys,score=score_of(ws,weights)
@@ -303,6 +304,8 @@ def enter(c,chain,trades,weights,now,winrates=None):
                 [(cur.lastrowid,w,chain,winrates.get(w,0.0),weights[w]) for w in buys])
   top=max(buys,key=lambda w:weights[w])
   emit(c,"ENTRY",f"{chain} {m} | wallets={len(buys)} score={score:.4f} (лучший {top[:8]}… wr={winrates.get(top,0)*100:.0f}%) | {STAKE:.4f} SOL")
+  opened.add(m)
+ return opened
 def stop_level(entry,peak):
     """Where this position closes right now: (binding, hard, trailing, armed).
 
@@ -460,7 +463,7 @@ def last_cycle_ts(c):
  return (row[0] if row and row[0] else 0) or 0
 ELITE_WINRATE=config.get_float("GMGN_ELITE_WINRATE",0.90)
 ELITE_CALLOUTS_MAX=config.get_int("GMGN_ELITE_CALLOUTS_MAX",10)
-def missed_elite_signals(c,chain,trades,now,since):
+def missed_elite_signals(c,chain,trades,now,since,just_opened=()):
  """Report a top-winrate buy the engine could NOT act on, and why.
 
  A wallet at ELITE_WINRATE now carries a full ENTRY_SCORE, so its buy opens a position
@@ -476,11 +479,14 @@ def missed_elite_signals(c,chain,trades,now,since):
  cutoff=max(since,now-WINDOW)
  elite=dict(c.execute("SELECT address,winrate FROM wallet_watch WHERE chain=? AND active=1 AND winrate>=?",(chain,ELITE_WINRATE)))
  if not elite: return
- open_mints={r[0] for r in c.execute("SELECT token_mint FROM paper_positions WHERE status='open'")}
+ # Runs after enter(), so a mint opened this cycle is already "open". Reporting it as
+ # missed would contradict the ENTRY event raised moments earlier for the same buy.
+ open_mints={r[0] for r in c.execute("SELECT token_mint FROM paper_positions WHERE status='open'")}-set(just_opened)
  balance=(c.execute("SELECT budget_sol FROM paper_account WHERE id=1").fetchone() or [0.0])[0]
  seen=set(); sent=0
  for t in sorted(trades,key=stamp,reverse=True):
   w=wallet(t); m=mint(t)
+  if m in just_opened: continue   # acted on this cycle; ENTRY already said so
   if not (w in elite and m and quote(t)=="buy" and stamp(t)>cutoff and allowed(t,chain)): continue
   if (w,m) in seen: continue
   seen.add((w,m))
@@ -505,8 +511,8 @@ def cycle(c):
   # 3. Entry decisions off cached winrates, plus a bounded lookup of unseen makers.
   learn_new_makers(c,chain,trades,now)
   winrates=cached_winrates(c,chain); weights=weights_from(winrates)
-  enter(c,chain,trades,weights,now,winrates); save_token_scores(c,chain,trades,weights,now)
-  missed_elite_signals(c,chain,trades,now,since)
+  opened=enter(c,chain,trades,weights,now,winrates); save_token_scores(c,chain,trades,weights,now)
+  missed_elite_signals(c,chain,trades,now,since,opened)
   # 4. Background bookkeeping, throttled so it cannot dominate the loop. The last run is
   # persisted so a restart loop cannot hammer the stats API.
   if chain not in _last_maint:
