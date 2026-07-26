@@ -776,6 +776,80 @@ class WebappPositionTests(unittest.TestCase):
         self.assertEqual(merged["a"], 5.0, "one bad poll must not blank the position")
 
 
+class SeedImportTests(unittest.TestCase):
+    """Startup imports run on every restart, so they must not undo cleanup."""
+
+    def setUp(self):
+        import run_engine
+        self.run_engine = run_engine
+        self._seeds = run_engine.SEEDS_PATH
+
+    def tearDown(self):
+        self.run_engine.SEEDS_PATH = self._seeds
+
+    def _seed_file(self, text):
+        fd, path = tempfile.mkstemp(suffix=".txt")
+        os.close(fd)
+        pathlib.Path(path).write_text(text, encoding="utf-8")
+        self.addCleanup(os.unlink, path)
+        self.run_engine.SEEDS_PATH = pathlib.Path(path)
+
+    def _legacy(self, c, addresses):
+        c.execute("CREATE TABLE IF NOT EXISTS wallet_scores(wallet_address TEXT)")
+        c.executemany("INSERT INTO wallet_scores VALUES(?)", [(a,) for a in addresses])
+
+    def test_blacklisted_legacy_wallet_is_not_resurrected(self):
+        # Regression: import_old_wallets skipped the blacklist check, so a wallet banned
+        # by cleanup_wallets returned on the next restart, had its stats fetched again,
+        # and was banned again — burning API calls on a known-bad wallet, every restart.
+        c = fresh_db()
+        self._legacy(c, [WALLET_A, WALLET_B])
+        c.execute("INSERT INTO wallet_blacklist VALUES(?,?,?,?)", (WALLET_A, "sol", NOW, "low_winrate"))
+
+        self.run_engine.import_old_wallets(c)
+
+        watched = {r[0] for r in c.execute("SELECT address FROM wallet_watch")}
+        self.assertNotIn(WALLET_A, watched, "a banned wallet must stay banned across restarts")
+        self.assertIn(WALLET_B, watched)
+
+    def test_malformed_legacy_rows_are_rejected(self):
+        c = fresh_db()
+        self._legacy(c, ["not-an-address", "<script>alert(1)</script>", WALLET_A])
+        imported = self.run_engine.import_old_wallets(c)
+
+        self.assertEqual(imported, 1)
+        self.assertEqual({r[0] for r in c.execute("SELECT address FROM wallet_watch")}, {WALLET_A})
+
+    def test_seed_file_comments_and_junk_are_skipped(self):
+        c = fresh_db()
+        self._seed_file(f"# a comment\n\n{WALLET_A}\ngarbage\n  {WALLET_B}  \n")
+        imported = self.run_engine.import_seed_wallets(c)
+
+        self.assertEqual(imported, 2)
+        self.assertEqual({r[0] for r in c.execute("SELECT address FROM wallet_watch")},
+                         {WALLET_A, WALLET_B})
+
+    def test_blacklisted_seed_is_not_readmitted(self):
+        c = fresh_db()
+        c.execute("INSERT INTO wallet_blacklist VALUES(?,?,?,?)", (WALLET_A, "sol", NOW, "low_winrate"))
+        self._seed_file(f"{WALLET_A}\n{WALLET_B}\n")
+        self.assertEqual(self.run_engine.import_seed_wallets(c), 1)
+
+    def test_missing_legacy_tables_are_not_fatal(self):
+        c = fresh_db()  # no wallet_scores / candidate_wallets at all
+        self.assertEqual(self.run_engine.import_old_wallets(c), 0)
+
+    def test_repeated_import_is_idempotent(self):
+        c = fresh_db()
+        self._legacy(c, [WALLET_A])
+        self.run_engine.import_old_wallets(c)
+        c.execute("UPDATE wallet_watch SET winrate=0.8 WHERE address=?", (WALLET_A,))
+        self.run_engine.import_old_wallets(c)  # a restart
+
+        winrate = c.execute("SELECT winrate FROM wallet_watch WHERE address=?", (WALLET_A,)).fetchone()[0]
+        self.assertAlmostEqual(winrate, 0.8, msg="a restart must not reset a known win rate")
+
+
 class WinrateParsingTests(unittest.TestCase):
     """Win rate decides weight, elite status and blacklisting — it must parse exactly."""
 
