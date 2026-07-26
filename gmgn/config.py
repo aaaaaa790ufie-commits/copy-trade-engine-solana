@@ -271,7 +271,10 @@ COOLDOWN_SECONDS = get_int("GMGN_COOLDOWN_SECONDS", 420)
 TRAILING_ACTIVATE_PCT = get_float("TRAILING_ACTIVATE_PCT", 25.0)
 TRAILING_DISTANCE_PCT = get_float("TRAILING_DISTANCE_PCT", 15.0)
 HARD_STOP_PCT = get_float("HARD_STOP_PCT", 45.0)
-FEED_LIMIT = get_int("GMGN_FEED_LIMIT", 200)
+# 100, not 200: GMGN caps this endpoint server-side and returns 100 rows whatever is
+# asked for — measured at 100, 150, 200 and 500, all of which came back with exactly
+# 100. The old default read as "we sample 200 trades a poll" and the engine never did.
+FEED_LIMIT = get_int("GMGN_FEED_LIMIT", 100)
 MAX_HOLD_SECONDS = get_int("GMGN_MAX_HOLD_SECONDS", 3600)
 ZERO_WINRATE_TTL = get_int("GMGN_ZERO_WINRATE_TTL_SECONDS", 3600)
 PRICE_TTL = get_int("GMGN_PRICE_TTL_SECONDS", 60)

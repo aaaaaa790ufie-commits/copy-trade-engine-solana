@@ -24,8 +24,25 @@ rows against 1188 active watched wallets (counts as of 2026-07-26 21:00). The tw
 after the fact — both are stored as `reason='low_winrate'` with no record of the
 win rate that triggered them.
 
-**Cost of leaving it:** the signal pool stays smaller than it should be, which
-directly reduces how often a genuine multi-wallet cluster can form.
+**Cost of leaving it, now measured rather than asserted.** Taken against a live feed
+sample on 2026-07-27, counting distinct wallets that actually placed a buy:
+
+| Buying makers in one feed poll | 28 |
+|---|---:|
+| known to `wallet_watch` | 6 |
+| **blacklisted — can never be re-added** | **21** |
+| genuinely new | 1 |
+
+**Three quarters of the wallets actively trading in the feed are locked out**, against a
+blacklist of 5614 versus a watch list of 1184. This is the mechanism behind the entry
+drought: `enter()` needs a weighted score of 1.0, the cluster it builds each poll can
+only draw on those 6, and the best score seen over 572 cycles is 0.4375. It cannot
+converge on a pool that excludes most of its own feed.
+
+That is not on its own proof the bans were wrong — a genuinely bad trader appearing in
+the feed is exactly what the blacklist is for. But the sweep that produced most of these
+entries could not distinguish "confirmed sub-50%" from "not enough data yet", and 21 of
+22 is far above the share of feed participants one would expect to be genuinely bad.
 
 **Remediation:** `python gmgn/unban_wallets.py --apply` clears `low_winrate`
 entries so the engine re-evaluates them under the corrected logic. It takes a
