@@ -33,6 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
+import paper_engine as pe  # noqa: E402
 
 LOG = logging.getLogger("webapp")
 STATIC_DIR = Path(__file__).resolve().parent / "webapp"
@@ -186,8 +187,9 @@ def _positions(c: sqlite3.Connection) -> list[dict]:
         current = mark or r["entry_price"]
         change = (current / r["entry_price"] - 1) if r["entry_price"] else 0.0
         peak = max(r["peak_price"], current)
-        peak_gain = (peak / r["entry_price"] - 1) if r["entry_price"] else 0.0
-        trail_armed = peak_gain >= config.TRAILING_ACTIVATE_PCT / 100
+        # From paper_engine, so the stop shown here is by construction the stop exits()
+        # enforces rather than a second implementation of the same rules.
+        stop, _, _, trail_armed = pe.stop_level(r["entry_price"], peak)
         out.append({
             "mint": r["token_mint"], "chain": r["chain"],
             "entry_price": r["entry_price"], "peak_price": peak, "current_price": current,
@@ -196,11 +198,7 @@ def _positions(c: sqlite3.Connection) -> list[dict]:
             "score": r["signal_score"], "wallets": r["wallet_count"],
             "change_pct": change * 100, "pnl_sol": r["stake_sol"] * change,
             "trailing_armed": trail_armed,
-            # Where the position gets closed right now, whichever stop binds first.
-            "stop_price": max(
-                r["entry_price"] * (1 - config.HARD_STOP_PCT / 100),
-                peak * (1 - config.TRAILING_DISTANCE_PCT / 100) if trail_armed else 0.0,
-            ),
+            "stop_price": stop,
             "expires_in": max(0, config.MAX_HOLD_SECONDS - (int(time.time()) - r["opened_at"])),
             "priced": mark > 0,
         })
@@ -228,7 +226,8 @@ def api_overview() -> dict:
         # a sample, or no recent buys) are counted separately rather than hidden, so the
         # panel shows why the pool is smaller than the row count suggests.
         wallets = c.execute(
-            "SELECT COUNT(*) n, SUM(winrate>=0.70) elite, SUM(winrate>=0.50) qualified, "
+            f"SELECT COUNT(*) n, SUM(winrate>={pe.WEIGHT_TIERS[0][0]}) elite, "
+            f"SUM(winrate>={pe.MIN_WEIGHTED_WINRATE}) qualified, "
             "AVG(CASE WHEN winrate>0 THEN winrate END) avg FROM wallet_watch WHERE active=1"
         ).fetchone()
         parked = c.execute("SELECT COUNT(*) FROM wallet_watch WHERE active=0").fetchone()[0]
@@ -286,8 +285,8 @@ def engine_heartbeat(c: sqlite3.Connection) -> int:
 
 
 def engine_alive(c: sqlite3.Connection) -> bool:
-    last = engine_heartbeat(c)
-    return bool(last and time.time() - last < max(120, config.POLL_SECONDS * 6))
+    # Shared with the bot, so both agree on what "running" means.
+    return pe.engine_is_alive(engine_heartbeat(c))
 
 
 def api_trades(limit: int = 50) -> dict:
@@ -311,9 +310,14 @@ def api_wallets(limit: int = 100) -> dict:
             "WHERE active=1 AND winrate>0 ORDER BY winrate DESC, last_seen DESC LIMIT ?",
             (limit,),
         ).fetchall()
+        # Buckets follow paper_engine's weight ladder, so the panel cannot show a
+        # grouping that no longer matches what actually carries weight.
+        elite, high, mid = (t[0] for t in pe.WEIGHT_TIERS)
         buckets = c.execute(
-            "SELECT SUM(winrate>=0.90) w90, SUM(winrate>=0.70 AND winrate<0.90) w70, "
-            "SUM(winrate>=0.60 AND winrate<0.70) w60, SUM(winrate>=0.50 AND winrate<0.60) w50, "
+            f"SELECT SUM(winrate>={pe.ELITE_WINRATE}) w90, "
+            f"SUM(winrate>={elite} AND winrate<{pe.ELITE_WINRATE}) w70, "
+            f"SUM(winrate>={high} AND winrate<{elite}) w60, "
+            f"SUM(winrate>={mid} AND winrate<{high}) w50, "
             "SUM(winrate=0) unknown FROM wallet_watch WHERE active=1"
         ).fetchone()
         blacklisted = c.execute("SELECT COUNT(*) FROM wallet_blacklist").fetchone()[0]

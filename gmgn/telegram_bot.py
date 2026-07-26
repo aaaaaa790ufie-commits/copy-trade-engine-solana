@@ -19,6 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
+import paper_engine as pe  # noqa: E402
 
 LOG = logging.getLogger("telegram-bot")
 DB = config.DB_PATH
@@ -214,7 +215,7 @@ def text(c: sqlite3.Connection, command: str) -> str:
         realized = c.execute("SELECT COALESCE(SUM(pnl_sol),0) FROM paper_trades WHERE action='EXIT'").fetchone()[0]
         hb = c.execute("SELECT updated_at FROM engine_state WHERE key='last_cycle'").fetchone()
         age = int(time.time()) - hb[0] if hb else None
-        alive = age is not None and age < max(120, config.POLL_SECONDS * 6)
+        alive = pe.engine_is_alive(hb[0] if hb else 0)
         out = [
             f"{'💀 БАНКРОТ' if bankrupt else '🟢 LIVE' if alive else '🔴 ДВИЖОК СТОИТ'}",
             f"Баланс: {balance:.5f} SOL  (старт {initial:.5f})",
@@ -240,13 +241,13 @@ def text(c: sqlite3.Connection, command: str) -> str:
         out = []
         for m, chain, entry, peak, stake, opened, score, wc in pos:
             gain = (peak / entry - 1) * 100 if entry else 0
-            hard = entry * (1 - config.HARD_STOP_PCT / 100)
-            trail = peak * (1 - config.TRAILING_DISTANCE_PCT / 100) if gain >= config.TRAILING_ACTIVATE_PCT else 0
+            # Shared with the engine, so this is the stop exits() will actually act on.
+            stop, hard, trail, _ = pe.stop_level(entry, peak)
             left = max(0, config.MAX_HOLD_SECONDS - (int(time.time()) - opened)) // 60
             out.append(
                 f"{chain} {m[:10]}…\n"
                 f"  вход {_fmt_price(entry)} · пик {_fmt_price(peak)} ({gain:+.1f}%)\n"
-                f"  стоп {_fmt_price(max(hard, trail))}{' (трейлинг)' if trail > hard else ''}\n"
+                f"  стоп {_fmt_price(stop)}{' (трейлинг)' if trail > hard else ''}\n"
                 f"  стейк {stake:.4f} SOL · {wc} кош. · score {score:.3f} · закроется через {left} мин"
             )
         return "\n\n".join(out)
@@ -270,7 +271,8 @@ def text(c: sqlite3.Connection, command: str) -> str:
     if command == "/wallets":
         rs = c.execute(
             "SELECT chain,COUNT(*),AVG(CASE WHEN winrate>0 THEN winrate END),"
-            "SUM(winrate>=0.90),SUM(winrate>=0.70),SUM(winrate>=0.50) "
+            f"SUM(winrate>={pe.ELITE_WINRATE}),SUM(winrate>={pe.WEIGHT_TIERS[0][0]}),"
+            f"SUM(winrate>={pe.MIN_WEIGHTED_WINRATE}) "
             "FROM wallet_watch WHERE active=1 GROUP BY chain"
         ).fetchall()
         if not rs:

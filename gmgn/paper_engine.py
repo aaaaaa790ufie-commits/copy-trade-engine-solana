@@ -82,7 +82,15 @@ def mint(t): return _addr(t,"base_address","token_address")
 def stamp(t): return int(n(t,"timestamp","trigger_at"))
 def quote(t): return str(t.get("side","")).lower()
 def wr(s): return n(s,"winrate","win_rate","pnl_stat.winrate")
-def weight(x): return .25 if x>=.70 else .0625 if x>=.60 else .03125 if x>=.50 else 0.0
+# The weight ladder, highest tier first. Single source of truth: the panel and the bot
+# build their win-rate buckets from this, so a change to the tiers cannot leave them
+# reporting groupings that no longer match what actually carries weight.
+WEIGHT_TIERS=((0.70,0.25),(0.60,0.0625),(0.50,0.03125))
+MIN_WEIGHTED_WINRATE=WEIGHT_TIERS[-1][0]
+def weight(x):
+ for threshold,w in WEIGHT_TIERS:
+  if x>=threshold: return w
+ return 0.0
 def px(t): return n(t,"price_now","price_usd","price")
 _price_cache={}
 PRICE_CACHE_MAX=config.get_int("GMGN_PRICE_CACHE_MAX",5000)
@@ -274,6 +282,20 @@ def enter(c,chain,trades,weights,now):
   # Reopening reuses it — the trade journal in paper_trades keeps the full history.
   c.execute("INSERT INTO paper_positions(token_mint,chain,entry_price,peak_price,stake_sol,opened_at,signal_score,wallet_count,status) VALUES(?,?,?,?,?,?,?,?,'open') ON CONFLICT(token_mint) DO UPDATE SET chain=excluded.chain,entry_price=excluded.entry_price,peak_price=excluded.peak_price,stake_sol=excluded.stake_sol,opened_at=excluded.opened_at,signal_score=excluded.signal_score,wallet_count=excluded.wallet_count,status='open'",(m,chain,p,p,STAKE,now,score,len(buys)))
   c.execute("INSERT INTO paper_trades(token_mint,chain,action,price,stake_sol,reason,wallet_count,signal_score,event_ts) VALUES(?,?,?,?,?,?,?,?,?)",(m,chain,"ENTRY",p,STAKE,"weighted cluster",len(buys),score,now)); emit(c,"ENTRY",f"{chain} {m} | wallets={len(buys)} score={score:.4f} | {STAKE:.4f} SOL")
+def stop_level(entry,peak):
+    """Where this position closes right now: (binding, hard, trailing, armed).
+
+    The single definition of the stop. exits() decides with it, and the Mini App and
+    the bot display with it — three copies of this arithmetic would let the stop shown
+    to the operator drift from the stop actually enforced.
+
+    `trailing` is 0.0 until the peak gain reaches TRAIL_ACT, so `binding` is the hard
+    stop early in a position's life and the trailing stop once it has run up.
+    """
+    armed = entry > 0 and (peak / entry - 1) >= TRAIL_ACT
+    hard = entry * (1 - HARD)
+    trail = peak * (1 - TRAIL_DIST) if armed else 0.0
+    return max(hard, trail), hard, trail, armed
 def exits(c,chain,trades,now):
  latest={}
  for t in trades:
@@ -297,7 +319,8 @@ def exits(c,chain,trades,now):
     if now-opened>=STUCK_AFTER and throttled(c,f"stuck_{m}",now,STUCK_REMIND):
      emit(c,"STUCK",f"{chain} {m} | {(now-opened)//3600}ч без котировки, ставка {stake:.4f} SOL заморожена")
    continue
-  peak=max(peak,current); change=current/entry-1; c.execute("UPDATE paper_positions SET peak_price=? WHERE token_mint=?",(peak,m)); hard=change<=-HARD; trailing=(peak/entry-1)>=TRAIL_ACT and current<=peak*(1-TRAIL_DIST)
+  peak=max(peak,current); change=current/entry-1; c.execute("UPDATE paper_positions SET peak_price=? WHERE token_mint=?",(peak,m))
+  _,hard_lvl,trail_lvl,armed=stop_level(entry,peak); hard=current<=hard_lvl; trailing=armed and current<=trail_lvl
   if hard or trailing or expired:
    reason=f"hard stop -{HARD*100:.0f}%" if hard else (f"trailing stop {TRAIL_DIST*100:.0f}%" if trailing else f"max hold {MAX_HOLD//3600}h"); pnl=stake*change; c.execute("UPDATE paper_account SET budget_sol=budget_sol+?,updated_at=? WHERE id=1",(stake+pnl,now)); c.execute("UPDATE paper_positions SET status='closed' WHERE token_mint=?",(m,)); c.execute("INSERT INTO paper_cooldowns VALUES(?,?,?) ON CONFLICT(token_mint,chain) DO UPDATE SET until_ts=excluded.until_ts",(m,chain,now+COOLDOWN)); c.execute("INSERT INTO paper_trades(token_mint,chain,action,price,stake_sol,pnl_sol,pnl_pct,reason,wallet_count,signal_score,event_ts) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(m,chain,"EXIT",current,stake,pnl,change,reason,count,score,now)); emit(c,"EXIT",f"{chain} {m} | {change*100:.2f}% ({pnl:+.5f} SOL) | {reason}")
  a=c.execute("SELECT budget_sol,bankrupt FROM paper_account WHERE id=1").fetchone()
@@ -337,6 +360,16 @@ def learn_new_makers(c,chain,trades,now):
   s=f"70%+: {len(high_wr)}"+(f" ex: {high_wr[0][0]}... {high_wr[0][1]*100:.0f}%" if high_wr else "")
   emit(c,"WALLET",f"{chain} | +{new_w} новых, всего {total} | {s}")
  return stats
+ALIVE_GRACE=config.get_int("GMGN_ALIVE_GRACE_SECONDS",120)
+def engine_is_alive(last_cycle_ts,now=None):
+    """Whether a heartbeat that old still counts as a running engine.
+
+    Shared by the bot's /status and the Mini App: two copies of this threshold could
+    disagree about whether the engine is up, which is the one thing both are there to
+    tell the operator."""
+    if not last_cycle_ts:
+        return False
+    return (now or time.time()) - last_cycle_ts < max(ALIVE_GRACE, POLL * 6)
 def heartbeat(c,now,detail=""):
  c.execute("INSERT INTO engine_state(key,value,updated_at) VALUES('last_cycle',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(detail or str(now),now))
 def last_cycle_ts(c):

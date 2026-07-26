@@ -516,6 +516,84 @@ class ClusterTests(unittest.TestCase):
         self.assertNotIn(MINT_C, published, "a wallet that sold out leaves no score behind")
 
 
+class StopLevelAgreementTests(unittest.TestCase):
+    """The engine, the panel and the bot must never disagree about where the stop is.
+
+    Each used to compute it independently. They agreed, but nothing made them agree —
+    a change to exits() would have left the panel and the bot showing a stop the engine
+    no longer enforced.
+    """
+
+    SCENARIOS = [
+        (1.0, 1.0, "fresh position, trailing not armed"),
+        (1.0, 1.24, "just below the trailing trigger"),
+        (1.0, 1.25, "exactly at the trailing trigger"),
+        (1.0, 2.0, "well past it"),
+        (1e-6, 3e-6, "memecoin-scale prices"),
+        (1234.5, 1234.5, "large prices"),
+    ]
+
+    def test_all_three_surfaces_agree(self):
+        import telegram_bot as bot
+        import webapp
+
+        for entry, peak, label in self.SCENARIOS:
+            with self.subTest(label):
+                binding, hard, trail, armed = pe.stop_level(entry, peak)
+
+                # The panel reads it straight from the same helper.
+                c = fresh_db()
+                c.execute("INSERT INTO paper_positions VALUES(?,'sol',?,?,0.025,?,1.0,4,'open')",
+                          (MINT_A, entry, peak, NOW))
+                c.row_factory = sqlite3.Row
+                webapp._prices[MINT_A] = peak
+                try:
+                    shown = webapp._positions(c)[0]
+                finally:
+                    webapp._prices.clear()
+                self.assertAlmostEqual(shown["stop_price"], binding, places=12, msg=label)
+                self.assertEqual(shown["trailing_armed"], armed, label)
+
+                # And so does the bot.
+                self.assertIs(bot.pe.stop_level, pe.stop_level)
+
+    def test_exits_closes_exactly_at_the_reported_level(self):
+        # The number displayed must be the number acted on, not merely close to it.
+        for entry, peak, label in self.SCENARIOS:
+            with self.subTest(label):
+                binding, _, _, _ = pe.stop_level(entry, peak)
+                saved = pe.token_price
+                try:
+                    c = fresh_db()
+                    c.execute("INSERT INTO paper_positions VALUES(?,'sol',?,?,0.025,?,1.0,4,'open')",
+                              (MINT_A, entry, peak, NOW))
+                    pe.token_price = lambda chain, mint: binding * (1 + 1e-9)  # a hair above
+                    pe.exits(c, "sol", [], NOW)
+                    self.assertEqual(
+                        c.execute("SELECT status FROM paper_positions").fetchone()[0], "open",
+                        f"{label}: must still be open just above the stop")
+
+                    pe.token_price = lambda chain, mint: binding * (1 - 1e-9)  # a hair below
+                    pe.exits(c, "sol", [], NOW + 1)
+                    self.assertEqual(
+                        c.execute("SELECT status FROM paper_positions").fetchone()[0], "closed",
+                        f"{label}: must close at the stop")
+                finally:
+                    pe.token_price = saved
+
+    def test_trailing_arms_only_after_the_activation_gain(self):
+        below, _, _, armed_below = pe.stop_level(1.0, 1.0 + config.TRAILING_ACTIVATE_PCT / 100 - 1e-9)
+        at, _, _, armed_at = pe.stop_level(1.0, 1.0 + config.TRAILING_ACTIVATE_PCT / 100)
+        self.assertFalse(armed_below)
+        self.assertTrue(armed_at)
+        self.assertGreater(at, below, "arming the trailing stop must raise the floor")
+
+    def test_zero_entry_price_does_not_divide(self):
+        binding, _, _, armed = pe.stop_level(0.0, 1.0)
+        self.assertFalse(armed)
+        self.assertEqual(binding, 0.0)
+
+
 class AccountingInvariantTests(unittest.TestCase):
     """Properties that must hold after any sequence of entries and exits.
 
