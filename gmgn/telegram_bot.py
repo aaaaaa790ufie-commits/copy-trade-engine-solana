@@ -44,9 +44,32 @@ def api(method: str, data: dict | None = None) -> dict:
         raise RuntimeError(f"{e.code} {detail}") from None
 
 
+# One list behind three surfaces: Telegram's command menu, the reply keyboard, and the
+# /help text. They were three hand-maintained copies plus a fourth in CLAUDE.md, so a
+# new command could reach the dispatcher and appear in none of them. This project has
+# already paid for that pattern three times — the stop level, the liveness threshold and
+# the weight ladder each existed in three places before they were made to derive.
+#   (name, menu description, /help line)
+COMMANDS = [
+    ("status",      "Счёт и открытые позиции",    "счёт и позиции"),
+    ("positions",   "Подробно по каждой позиции", "подробно по позициям"),
+    ("trades",      "Последние сделки",           "последние сделки"),
+    ("wallets",     "Пул кошельков",              "пул кошельков"),
+    ("weights",     "Монеты у порога входа",      "монеты у порога входа"),
+    ("attribution", "Кто заработал этому счёту",  "кто заработал этому счёту"),
+    ("config",      "Параметры движка",           "параметры движка"),
+    ("help",        "Список команд",              "это меню"),
+]
+
+
+def help_text() -> str:
+    return "\n".join(f"/{name} — {line}" for name, _, line in COMMANDS)
+
+
 def keyboard() -> str:
     """Persistent reply keyboard; the Mini App gets its own row when reachable."""
-    rows = [["/status", "/positions"], ["/trades", "/wallets"], ["/weights", "/attribution"], ["/config", "/help"]]
+    names = [f"/{name}" for name, _, _ in COMMANDS]
+    rows = [names[i:i + 2] for i in range(0, len(names), 2)]
     kb = {"keyboard": rows, "resize_keyboard": True, "is_persistent": True}
     if WEBAPP_URL:
         kb["keyboard"] = [[{"text": "📊 Панель", "web_app": {"url": WEBAPP_URL}}]] + rows
@@ -70,18 +93,9 @@ def install_menu_button() -> None:
 
 
 def install_commands() -> None:
-    cmds = [
-        ("status", "Счёт и открытые позиции"),
-        ("positions", "Подробно по каждой позиции"),
-        ("trades", "Последние сделки"),
-        ("wallets", "Пул кошельков"),
-        ("weights", "Монеты у порога входа"),
-        ("attribution", "Кто заработал этому счёту"),
-        ("config", "Параметры движка"),
-        ("help", "Список команд"),
-    ]
     try:
-        api("setMyCommands", {"commands": json.dumps([{"command": c, "description": d} for c, d in cmds])})
+        api("setMyCommands", {"commands": json.dumps(
+            [{"command": name, "description": desc} for name, desc, _ in COMMANDS])})
     except Exception as e:
         LOG.warning("could not register commands: %s", e)
 
@@ -406,14 +420,9 @@ def text(c: sqlite3.Connection, command: str) -> str:
             f"Окно кластера: {config.CLUSTER_WINDOW//60} мин"
         )
 
-    return ("/status — счёт и позиции\n"
-            "/positions — подробно по позициям\n"
-            "/trades — последние сделки\n"
-            "/wallets — пул кошельков\n"
-            "/weights — монеты у порога входа\n"
-            "/attribution — кто заработал этому счёту\n"
-            "/config — параметры движка\n"
-            "/help — это меню")
+    # Also the fallback for anything unrecognised, which is why it is not dispatched
+    # by name above.
+    return help_text()
 
 
 def main():

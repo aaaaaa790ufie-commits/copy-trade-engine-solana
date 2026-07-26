@@ -2951,6 +2951,50 @@ class FakeProc:
         self.returncode = code
 
 
+class BotCommandListTests(unittest.TestCase):
+    """The command list drove four hand-maintained copies: Telegram's menu, the reply
+    keyboard, the /help text and CLAUDE.md. Now it drives three and pins the fourth."""
+
+    def setUp(self):
+        import telegram_bot
+        self.bot = telegram_bot
+        self.source = pathlib.Path(telegram_bot.__file__).read_text(encoding="utf-8")
+
+    def _dispatched(self):
+        """Commands the handler actually answers by name, read from its own source."""
+        found = set(re.findall(r'command == "/(\w+)"', self.source))
+        for group in re.findall(r'command in \(([^)]*)\)', self.source):
+            found.update(re.findall(r'"/(\w+)"', group))
+        return found
+
+    def test_every_listed_command_is_answered(self):
+        listed = {name for name, _, _ in self.bot.COMMANDS}
+        dispatched = self._dispatched()
+        # /help is the fallback for anything unrecognised, so it is answered without
+        # being matched by name.
+        self.assertEqual(listed - dispatched - {"help"}, set(),
+                         "listed in the menu but the bot has no handler")
+
+    def test_every_answered_command_is_listed(self):
+        listed = {name for name, _, _ in self.bot.COMMANDS}
+        # /start is an alias for /status and deliberately absent from the menu.
+        self.assertEqual(self._dispatched() - listed - {"start"}, set(),
+                         "the bot answers this but it appears in no menu")
+
+    def test_the_keyboard_and_help_are_built_from_the_list(self):
+        listed = [f"/{name}" for name, _, _ in self.bot.COMMANDS]
+        keys = [k for row in json.loads(self.bot.keyboard())["keyboard"] for k in row]
+        self.assertEqual([k for k in keys if isinstance(k, str)], listed)
+        for name in listed:
+            self.assertIn(name + " — ", self.bot.help_text())
+
+    def test_claude_md_documents_exactly_these_commands(self):
+        doc = (pathlib.Path(config.ROOT) / "CLAUDE.md").read_text(encoding="utf-8")
+        documented = set(re.findall(r"^\|\s*`/(\w+)`\s*\|", doc, re.M))
+        self.assertEqual(documented, {name for name, _, _ in self.bot.COMMANDS},
+                         "CLAUDE.md's command table has drifted from the bot")
+
+
 class MonitorTests(unittest.TestCase):
     """The legacy signal producer. It writes to the same database the engine imports
     from, so what it persists still matters even though nothing runs it today."""
