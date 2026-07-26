@@ -805,3 +805,44 @@ OK
 Pass 9 was clean; Pass 10 was not; two more are needed. Notably this finding was an
 incomplete fix from Pass 8 — the passes keep catching this work rather than the
 original code, which is itself the argument for continuing.
+
+## Pass 11 — 2026-07-26
+
+Lens: an AST sweep of every `except` handler for ones that neither log nor act.
+
+### Found and fixed
+
+| # | Severity | Finding | Fix | Commit |
+|---|---|---|---|---|
+| 56 | Medium | The `"winrate" in key` substring bug — False for `"win_rate"` — was fixed in `paper_engine` and `mass_discovery` in Pass 2 but survived in `monitor.py`, which has its own `number()`. `qualifies()` compares against `MIN_WINRATE=0.70`, so a wallet reporting 75 under that spelling parsed as 75.0, cleared the gate for the wrong reason, and was written to `wallet_scores` as qualifying | Shares `_is_winrate_key` with the engine; the test now iterates all three parsers | `c772ce7` |
+
+`number()` also swallowed a parse failure with `pass`, abandoning the whole key lookup
+instead of trying the remaining spellings; it now continues.
+
+The other seven handlers the sweep flagged are deliberate and were left alone: stream
+reconfiguration that may legitimately fail, a `KeyboardInterrupt` with cleanup in
+`finally`, `kill()` followed by a nested wait, and a pre-heartbeat database fallback.
+
+```
+$ python -m unittest discover -s gmgn -p 'test_*.py'
+Ran 137 tests in 9.626s
+OK
+```
+
+Stack healthy throughout: cycles at 5.5–7.6 s against a 15 s poll.
+
+### Where this is heading
+
+Findings per pass: 21, 12, 7, 8, 1, 1, 1, 3, **0**, 1, 1. The trend is real, and so is
+the pattern in what is left — the last four findings were all the *same* kind: a fix
+applied in one place and not propagated to the others that shared the rule. Pass 8
+unified the stop level but left literals inside `paper_engine`; Pass 2 fixed win-rate
+scaling in two of three parsers.
+
+Each such fix now ends with a test that enumerates every implementation rather than
+checking one, which is what stops that class recurring. That is why the remaining
+findings are worth the passes, but it is also fair to say the returns have narrowed
+to this one seam.
+
+**Pass 11 was not clean.** Two consecutive clean passes are still required; the run
+currently stands at zero.
