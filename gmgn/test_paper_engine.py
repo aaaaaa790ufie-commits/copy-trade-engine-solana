@@ -981,6 +981,36 @@ class AccountingInvariantTests(unittest.TestCase):
         self.assertEqual(
             c.execute("SELECT COUNT(*) FROM paper_positions WHERE status='open'").fetchone()[0], 0)
 
+    def test_the_starting_balance_comes_from_the_setting(self):
+        """PAPER_BUDGET_SOL is documented in .env.example, CLAUDE.md and README as the
+        starting balance. It was read into config.BUDGET_SOL and then ignored: the
+        account row lived inside init()'s executescript(), which takes no parameters, so
+        it was hardcoded to 0.1 and the setting did nothing at all.
+
+        The existing consistency tests could not catch this — they check that a
+        documented key is *read* somewhere, not that reading it has an effect.
+        """
+        saved = pe.BUDGET
+        pe.BUDGET = 0.5
+        self.addCleanup(lambda: setattr(pe, "BUDGET", saved))
+
+        c = sqlite3.connect(":memory:")
+        pe.init(c)
+        self.assertEqual(
+            c.execute("SELECT budget_sol,initial_budget_sol FROM paper_account WHERE id=1").fetchone(),
+            (0.5, 0.5))
+
+    def test_init_never_rewrites_an_existing_account(self):
+        # Every process calls init() on startup, so this runs against a live account
+        # constantly. Reseeding it would hand the operator their stake back.
+        c = fresh_db()
+        c.execute("UPDATE paper_account SET budget_sol=0.02,initial_budget_sol=0.1")
+        c.commit()
+        pe.init(c)
+        self.assertEqual(
+            c.execute("SELECT budget_sol,initial_budget_sol FROM paper_account WHERE id=1").fetchone(),
+            (0.02, 0.1))
+
     def test_books_balance_across_randomised_sequences(self):
         """The scripted case above covers the paths someone thought of. This covers the
         rest: pseudo-random interleavings of entries, price moves and exits, with the

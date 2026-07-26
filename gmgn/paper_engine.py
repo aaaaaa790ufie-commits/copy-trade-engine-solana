@@ -5,7 +5,7 @@ from collections import defaultdict
 import config
 LOG=logging.getLogger("paper-engine")
 # All tunables and credentials come from the repo-local .env via config.py.
-DB=config.DB_PATH; STAKE=config.STAKE_SOL; WINDOW=config.CLUSTER_WINDOW; COOLDOWN=config.COOLDOWN_SECONDS; POLL=config.POLL_SECONDS; ENTRY=config.ENTRY_SCORE; TRAIL_ACT=config.TRAILING_ACTIVATE_PCT/100; TRAIL_DIST=config.TRAILING_DISTANCE_PCT/100; HARD=config.HARD_STOP_PCT/100; LIMIT=config.FEED_LIMIT; CHAINS=config.CHAINS
+DB=config.DB_PATH; STAKE=config.STAKE_SOL; BUDGET=config.BUDGET_SOL; WINDOW=config.CLUSTER_WINDOW; COOLDOWN=config.COOLDOWN_SECONDS; POLL=config.POLL_SECONDS; ENTRY=config.ENTRY_SCORE; TRAIL_ACT=config.TRAILING_ACTIVATE_PCT/100; TRAIL_DIST=config.TRAILING_DISTANCE_PCT/100; HARD=config.HARD_STOP_PCT/100; LIMIT=config.FEED_LIMIT; CHAINS=config.CHAINS
 MAX_HOLD=config.MAX_HOLD_SECONDS; ZERO_TTL=config.ZERO_WINRATE_TTL; PRICE_TTL=config.PRICE_TTL
 def _find_gmgn():
     """Resolve the gmgn-cli entrypoint. On Windows CreateProcess needs the .cmd shim
@@ -145,7 +145,6 @@ def init(c):
  c.execute("PRAGMA journal_mode=WAL")
  c.executescript("""
 CREATE TABLE IF NOT EXISTS paper_account(id INTEGER PRIMARY KEY CHECK(id=1),budget_sol REAL NOT NULL,initial_budget_sol REAL NOT NULL,bankrupt INTEGER NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL);
-INSERT OR IGNORE INTO paper_account VALUES(1,0.1,0.1,0,strftime('%s','now'));
 CREATE TABLE IF NOT EXISTS paper_positions(token_mint TEXT PRIMARY KEY,chain TEXT NOT NULL,entry_price REAL NOT NULL,peak_price REAL NOT NULL,stake_sol REAL NOT NULL,opened_at INTEGER NOT NULL,signal_score REAL NOT NULL,wallet_count INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'open');
 CREATE TABLE IF NOT EXISTS paper_trades(id INTEGER PRIMARY KEY AUTOINCREMENT,token_mint TEXT NOT NULL,chain TEXT NOT NULL,action TEXT NOT NULL,price REAL NOT NULL,stake_sol REAL NOT NULL,pnl_sol REAL NOT NULL DEFAULT 0,pnl_pct REAL NOT NULL DEFAULT 0,reason TEXT NOT NULL,wallet_count INTEGER NOT NULL,signal_score REAL NOT NULL,event_ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS paper_cooldowns(token_mint TEXT NOT NULL,chain TEXT NOT NULL,until_ts INTEGER NOT NULL,PRIMARY KEY(token_mint,chain));
@@ -167,7 +166,14 @@ CREATE INDEX IF NOT EXISTS idx_trade_wallets_addr ON trade_wallets(address);
 CREATE INDEX IF NOT EXISTS idx_trades_ts ON paper_trades(event_ts);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON engine_events(event_ts);
 CREATE INDEX IF NOT EXISTS idx_watch_winrate ON wallet_watch(chain,active,winrate);
-"""); c.commit()
+""")
+ # Seeded from PAPER_BUDGET_SOL rather than a literal. executescript() takes no
+ # parameters, so the account row sat inside the schema block hardcoded to 0.1 — which
+ # made the setting inert while .env.example, CLAUDE.md and README all described it as
+ # the starting balance. OR IGNORE, so this is first-run only and an existing account
+ # is never rewritten.
+ c.execute("INSERT OR IGNORE INTO paper_account VALUES(1,?,?,0,strftime('%s','now'))",(BUDGET,BUDGET))
+ c.commit()
 def emit(c,kind,msg): LOG.info("%s: %s",kind,msg); c.execute("INSERT INTO engine_events VALUES(NULL,?,?,?)",(int(time.time()),kind,msg))
 def is_blacklisted(c,addr,chain): return bool(c.execute("SELECT 1 FROM wallet_blacklist WHERE address=? AND chain=?",(addr,chain)).fetchone())
 def get_stats(chain,wallets,max_batches=0):
