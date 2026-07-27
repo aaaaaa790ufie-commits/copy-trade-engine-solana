@@ -55,6 +55,52 @@ python gmgn/mass_discovery.py --dry-run --target 3000 --max-tokens 30
 
 Do not commit a generated multi-thousand-wallet snapshot blindly. Run it with the connected GMGN account, inspect the count and top rows, then commit the resulting `wallets-quality.txt`. The bot can keep running during discovery because the file replacement is atomic.
 
+## Scaling to tens of thousands: pump.fun harvesting
+
+GMGN's curated feeds are the bottleneck for pool size, not for quality — `track smartmoney` and `track kol` together surface a few hundred wallets, and the weighted rule needs a far bigger universe before several qualified wallets ever land on the same fresh token.
+
+Since this project only trades the pump.fun launchpad (and PumpSwap), pump.fun's own public API is the natural volume source: every trade row carries the trader's wallet, so one busy mint yields hundreds of distinct addresses for a handful of calls.
+
+**pump.fun does not publish win rates.** There is no PnL or "smart wallet" endpoint; anything advertising one is a third-party wrapper. So the pipeline is two stages and the second one is the expensive half:
+
+```text
+stage 1  pump.fun /coins + /trades/all/{mint}  ->  tens of thousands of addresses  (cheap)
+stage 2  GMGN portfolio stats                  ->  30d win rate + sample size      (rate-limited)
+```
+
+```bash
+# one-off: harvest 300 mints, verify the 2,000 most promising wallets
+python gmgn/pumpfun_discovery.py --harvest-mints 300 --verify 2000
+
+# continuous: keep growing the pool in the background
+python gmgn/pumpfun_discovery.py --loop --harvest-mints 150 --verify 1000
+
+# counters only, no API calls
+python gmgn/pumpfun_discovery.py --status
+```
+
+Verified wallets are written straight into `wallet_watch` with source `pumpfun`, so the engine picks them up on its next maintenance tick without a restart, and mirrored to `wallets-pumpfun.txt` for inspection.
+
+Both stages are resumable: scanned mints, candidate stats and verification status live in SQLite (`pumpfun_candidates`, `pumpfun_scanned_mints`, `pumpfun_wallet_mints`). Stop it with Ctrl+C and the next run continues instead of restarting.
+
+Two design details that matter more than they look:
+
+- **Verification order is by distinct mints, then volume.** Stage 2 is the scarce resource, so it is spent on wallets that traded several different coins — repeat traders — rather than on the pool in insertion order.
+- **Missing stats are not a rejection.** A wallet GMGN returned no row for stays `new` and is retried later. Only a confirmed sub-50% win rate, or too small a 30-day sample, marks it `rejected`.
+
+Expect the funnel to be brutal, and that is the point: most launchpad traders lose money, so tens of thousands of harvested addresses will yield a much smaller verified set. Growing the pool is cheap; the honest limit is how fast GMGN's rate limiter lets stage 2 confirm win rates.
+
+| Setting | Default | Purpose |
+|---|---:|---|
+| `PUMPFUN_MIN_TRADE_SOL` | 0.05 | ignore dust trades when harvesting |
+| `PUMPFUN_MIN_MINTS` | 2 | distinct coins before a wallet is worth verifying |
+| `PUMPFUN_MIN_TRADES` | 3 | harvested trades before a wallet is worth verifying |
+| `PUMPFUN_MIN_WINRATE` | 0.50 | GMGN 30d win-rate gate |
+| `PUMPFUN_MIN_30D_TRADES` | 5 | reject lucky 100%-on-one-trade wallets |
+| `PUMPFUN_STATS_DELAY` | 0.35 | pause between GMGN stats batches |
+| `PUMPFUN_RECHECK_SECONDS` | 86400 | re-verify an accepted wallet after a day |
+| `PUMPFUN_AUTH_TOKEN` | (unset) | optional pump.fun JWT for fewer throttles |
+
 ## Paper account and exits
 
 - Initial paper balance: 0.1 SOL.
@@ -132,3 +178,7 @@ Every call the engine makes — smart-money feed, portfolio stats, token info, K
 discovery — was verified to work with the key withheld. `gmgn_env(allow_signing=True)`
 exists so that a caller which genuinely needs to sign has to say so where it can be
 reviewed; a test asserts no file in this project does.
+
+The pump.fun harvester follows the same rule: it only performs public GET requests
+against the launchpad and read-only `portfolio stats` calls through the same
+key-stripped environment.
