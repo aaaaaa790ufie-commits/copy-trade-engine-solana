@@ -55,3 +55,7 @@ sentinel-secrets/
 # between mkstemp and os.replace, but a crash in that window would leave one behind.
 bot_state.json
 .bot_state.*.tmp
+
+# Generated artifacts
+wallets-pumpfun.txt
+wallets-quality.txt

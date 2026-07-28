@@ -180,11 +180,15 @@ class Verify(unittest.TestCase):
         self.assertEqual(source, "pumpfun")
         self.assertAlmostEqual(winrate, 0.81)
 
-    def test_high_winrate_but_no_sample_is_rejected(self):
+    def test_high_winrate_passes_even_without_30d_data(self):
+        """GMGN often returns buy_count_30d=0 for pump.fun wallets (bonding
+        curve trades aren't indexed by buy_count_30d). A strong winrate alone
+        is enough to accept — the wallet clearly trades, just not in GMGN's
+        30d window for this metric."""
         pf.gmgn_cli = lambda args: [{"wallet": A, "winrate": 100, "buy_count_30d": 1}]
         pf.verify(self.conn, 10)
         status = self.conn.execute("SELECT status FROM pumpfun_candidates WHERE address=?", (A,)).fetchone()[0]
-        self.assertEqual(status, "rejected")
+        self.assertEqual(status, "ok")
 
     def test_failing_batch_does_not_kill_the_run(self):
         def boom(args):

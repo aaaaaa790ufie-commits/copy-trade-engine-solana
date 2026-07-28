@@ -73,7 +73,7 @@ COINS_PAGE = config.get_int("PUMPFUN_COINS_PAGE", 50)
 MIN_WINRATE = config.get_float("PUMPFUN_MIN_WINRATE", 0.50)
 MIN_MINTS = config.get_int("PUMPFUN_MIN_MINTS", 2)
 MIN_TRADES = config.get_int("PUMPFUN_MIN_TRADES", 3)
-MIN_30D_TRADES = config.get_int("PUMPFUN_MIN_30D_TRADES", 5)
+MIN_30D_TRADES = config.get_int("PUMPFUN_MIN_30D_TRADES", 3)
 STATS_BATCH = config.get_int("PUMPFUN_STATS_BATCH", 10)
 STATS_DELAY = config.get_float("PUMPFUN_STATS_DELAY", 0.35)
 RECHECK_SECONDS = config.get_int("PUMPFUN_RECHECK_SECONDS", 86400)
@@ -480,7 +480,7 @@ def verify(conn: sqlite3.Connection, limit: int) -> tuple[int, int]:
                 continue
             winrate = number(stat, "winrate", "win_rate", "pnl_stat.winrate")
             trades_30d = number(stat, "buy_count_30d", "txs_30d", "trades_30d", "buy_count")
-            good = winrate >= MIN_WINRATE and trades_30d >= MIN_30D_TRADES
+            good = winrate >= MIN_WINRATE
             conn.execute(
                 "UPDATE pumpfun_candidates SET checked_at=?, winrate=?, status=? WHERE address=?",
                 (now, winrate, "ok" if good else "rejected", address),
