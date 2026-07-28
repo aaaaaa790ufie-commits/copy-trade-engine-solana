@@ -371,13 +371,16 @@ def gmgn_cli(args: list[str]) -> Any:
     proc = subprocess.run(
         [binary, *args, "--raw"],
         capture_output=True,
-        text=True,
         timeout=90,
         env=config.gmgn_env(),
     )
     if proc.returncode:
-        raise RuntimeError((proc.stderr or proc.stdout).strip()[:400])
-    lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+        raise RuntimeError((proc.stderr or proc.stdout or b"").decode("utf-8", errors="replace").strip()[:400])
+    raw = proc.stdout
+    if not raw:
+        return {}
+    text = raw.decode("utf-8", errors="replace")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
     return json.loads(lines[-1]) if lines else {}
 
 
