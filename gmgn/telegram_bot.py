@@ -317,9 +317,10 @@ def text(c: sqlite3.Connection, command: str) -> str:
         current = webapp.performance(c, reset_at) if reset_at else lifetime
 
         def both(fmt) -> str:
-            """Current period, then the lifetime figure in parentheses."""
+            """Lifetime first, current period in parentheses."""
+            life = fmt(lifetime)
             shown = fmt(current)
-            return shown + " (" + fmt(lifetime) + ")" if reset_at else shown
+            return life + " (" + shown + ")" if reset_at else life
 
         def money(s):
             return "{:+.5f} SOL".format(s["realized_sol"])
@@ -357,7 +358,7 @@ def text(c: sqlite3.Connection, command: str) -> str:
         ]
         if reset_at:
             hours = (int(time.time()) - reset_at) / 3600
-            out.append(f"Метрики за {hours:.1f} ч с пополнения (в скобках — всего):")
+            out.append(f"Метрики за {hours:.1f} ч с пополнения (в скобках — тек.период):")
         out += [
             "P&L: " + both(money),
             "Сделок: " + both(counted),

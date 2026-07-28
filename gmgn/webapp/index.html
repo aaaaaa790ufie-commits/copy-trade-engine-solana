@@ -177,18 +177,21 @@ function renderHero(d){
               : ["live","LIVE"];
   hero.querySelector(".equity").innerHTML = `${d.equity_sol.toFixed(5)}<small>SOL</small>`;
 
-  // Leading figure is the current settings' result; the lifetime number, which still
-  // carries whatever earlier configurations did, follows in parentheses.
-  const cur = d.current_pnl_sol ?? d.total_pnl_sol;
-  const curBase = d.current_base_sol || d.initial_sol;
+  // Leading figure is the lifetime result; the current period, which only
+  // carries what happened since the last top-up, follows in parentheses.
+  const totalPnl = d.total_pnl_sol ?? d.current_pnl_sol;
+  const totalBase = d.initial_sol || d.current_base_sol;
   // Needs a positive base. After a withdrawal larger than the capital ever put in the
-  // base can be zero or negative, and cur/base then flips the sign. The SOL figure is
+  // base can be zero or negative, and total/base then flips the sign. The SOL figure is
   // right either way, so show it alone rather than an inverted percentage.
-  const curPct = curBase > 0 ? (cur / curBase * 100) : null;
+  const totalPct = totalBase > 0 ? (totalPnl / totalBase * 100) : null;
+  const curPnl = d.current_pnl_sol ?? 0;
+  const curBase = d.current_base_sol || 0;
+  const curPct = curBase > 0 ? (curPnl / curBase * 100) : null;
   const p = hero.querySelector(".pnl");
-  p.className = "pnl num " + cls(cur);
-  p.innerHTML = `${cur>=0?"+":""}${fmtSol(cur)} SOL${pctPart(curPct)}` +
-    (d.reset_at ? `<span class="sub" style="margin-left:6px">(всего ${d.total_pnl_sol>=0?"+":""}${fmtSol(d.total_pnl_sol)}${pctPart(d.total_pnl_pct)})</span>` : "");
+  p.className = "pnl num " + cls(totalPnl);
+  p.innerHTML = `${totalPnl>=0?"+":""}${fmtSol(totalPnl)} SOL${pctPart(totalPct)}` +
+    (d.reset_at ? `<span class="sub" style="margin-left:6px">(тек.период ${curPnl>=0?"+":""}${fmtSol(curPnl)} SOL${pctPart(curPct)})</span>` : "");
 
   const b = hero.querySelector(".badge");
   b.className = "badge " + badge[0]; b.textContent = badge[1];
@@ -208,14 +211,13 @@ function renderHero(d){
   ].map(([label,val,c]) => `<div class="stat"><b class="${c}">${val}</b><span>${label}</span></div>`).join("");
 }
 
-/* Current settings first, lifetime in parentheses. Before any reset there is only one
-   period, so the parenthetical is omitted rather than repeating the same number.
-   One helper for the whole page: the hero and the results card had grown separate
-   versions with different signatures and different fallbacks. */
+/* Lifetime first, current period in parentheses. Before any reset there is only one
+   period, so the parenthetical is omitted rather than repeating the same number. */
 function pair(d, fmt){
   const cur = fmt(d.current || d.lifetime || {});
-  if (!d.reset_at) return cur;
-  return `${cur}<span class="sub" style="font-weight:400"> (${fmt(d.lifetime || {})})</span>`;
+  const life = fmt(d.lifetime || {});
+  if (!d.reset_at) return life;
+  return `${life}<span class="sub" style="font-weight:400"> (${cur})</span>`;
 }
 
 function renderSpark(points){
@@ -311,7 +313,7 @@ function viewOverview(){
   return `
     <div class="sec-title">Открытые позиции</div>${pos}
     ${d.positions.length > 3 ? `<div class="sub" style="text-align:center;margin:6px">и ещё ${d.positions.length-3} — вкладка «Позиции»</div>` : ""}
-    <div class="sec-title">Результаты${d.reset_at ? " · с последнего пополнения (всего)" : ""}</div>
+    <div class="sec-title">Результаты${d.reset_at ? " · всего (тек.период)" : ""}</div>
     <div class="card">
       <div class="row"><span class="sub">Закрытых сделок</span><b class="num">${pair(d, s => String(s.closed))}</b></div>
       <div class="row"><span class="sub">Реализованный P&L</span><b class="num ${cls((d.current||d.lifetime).realized_sol)}">${pair(d, s => (s.realized_sol>=0?"+":"")+fmtSol(s.realized_sol)+" SOL")}</b></div>
