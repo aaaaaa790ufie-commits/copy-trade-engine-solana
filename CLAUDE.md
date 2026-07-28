@@ -126,6 +126,7 @@ straight into deletion without ever scoring them.
 | `WEBAPP_PUBLIC_URL` | — | HTTPS origin; enables the Telegram button **and** auth |
 | `PUMPFUN_MIN_TRADE_SOL` | 0.05 | ignore dust trades when harvesting |
 | `PUMPFUN_MIN_MINTS` | 2 | distinct mints before a wallet is worth verifying |
+| `PUMPFUN_TRADERS_LIMIT` | 100 | traders per mint from GMGN |
 | `PUMPFUN_MIN_WINRATE` | 0.50 | GMGN 30d win-rate gate for harvester |
 | `PUMPFUN_MIN_30D_TRADES` | 5 | reject lucky 100%-on-one-trade wallets |
 | `PUMPFUN_STATS_DELAY` | 0.35 | pause between GMGN stats batches |

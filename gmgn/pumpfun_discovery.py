@@ -63,11 +63,10 @@ HTTP_TIMEOUT = config.get_int("PUMPFUN_HTTP_TIMEOUT", 25)
 REQUEST_DELAY = config.get_float("PUMPFUN_REQUEST_DELAY", 0.25)
 MAX_RETRIES = config.get_int("PUMPFUN_MAX_RETRIES", 4)
 
-# A dust trade is not evidence of a trader. 0.05 SOL keeps 1-lamport probes and
-# spam bots out of the candidate pool at zero extra cost.
-MIN_TRADE_SOL = config.get_float("PUMPFUN_MIN_TRADE_SOL", 0.05)
-TRADES_PAGE = config.get_int("PUMPFUN_TRADES_PAGE", 200)
-TRADES_MAX_PAGES = config.get_int("PUMPFUN_TRADES_MAX_PAGES", 12)
+# How many traders to request per mint from GMGN's token traders API.
+# GMGN returns the top holders/traders sorted by holdings. Higher values use
+# more API budget but find more wallet candidates per mint.
+TRADERS_LIMIT = config.get_int("PUMPFUN_TRADERS_LIMIT", 100)
 COINS_PAGE = config.get_int("PUMPFUN_COINS_PAGE", 50)
 
 # Verification gates, matching the engine's own wallet filter.
@@ -80,7 +79,6 @@ STATS_DELAY = config.get_float("PUMPFUN_STATS_DELAY", 0.35)
 RECHECK_SECONDS = config.get_int("PUMPFUN_RECHECK_SECONDS", 86400)
 
 BASE58 = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
-LAMPORTS = 1_000_000_000.0
 
 _stop = False
 
@@ -161,34 +159,6 @@ def as_rows(payload: Any) -> list[dict[str, Any]]:
 
 def mint_of(row: dict[str, Any]) -> str:
     return str(row.get("mint") or row.get("address") or row.get("coin_mint") or "")
-
-
-def trader_of(row: dict[str, Any]) -> str:
-    return str(row.get("user") or row.get("trader") or row.get("wallet") or row.get("owner") or "")
-
-
-def trade_sol(row: dict[str, Any]) -> float:
-    raw = row.get("sol_amount", row.get("solAmount", 0)) or 0
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        return 0.0
-    # /trades reports lamports; a value already in SOL is far below this threshold.
-    return value / LAMPORTS if value > 1000 else value
-
-
-def trade_ts(row: dict[str, Any]) -> int:
-    for key in ("timestamp", "created_timestamp", "last_trade_timestamp"):
-        raw = row.get(key)
-        if not raw:
-            continue
-        try:
-            value = int(float(raw))
-        except (TypeError, ValueError):
-            continue
-        return value // 1000 if value > 10_000_000_000 else value
-    return 0
-
 
 # --------------------------------------------------------------------------
 # Mint discovery
@@ -306,30 +276,38 @@ def already_watched(conn: sqlite3.Connection) -> set[str]:
 # --------------------------------------------------------------------------
 
 def scan_mint(conn: sqlite3.Connection, mint: str, now: int) -> int:
-    """Page through one mint's trades and upsert every distinct trader."""
-    stats: dict[str, dict[str, float]] = {}
-    for page in range(TRADES_MAX_PAGES):
-        if _stop:
-            break
-        payload = api_get(
-            f"/trades/all/{mint}",
-            {"limit": TRADES_PAGE, "offset": page * TRADES_PAGE, "minimumSize": MIN_TRADE_SOL},
-        )
-        rows = as_rows(payload)
-        if not rows:
-            break
-        for row in rows:
-            address = trader_of(row)
-            if not valid_address(address):
-                continue
-            entry = stats.setdefault(address, {"trades": 0.0, "sol": 0.0, "ts": 0.0})
-            entry["trades"] += 1
-            entry["sol"] += trade_sol(row)
-            entry["ts"] = max(entry["ts"], float(trade_ts(row)))
-        if len(rows) < TRADES_PAGE:
-            break
+    """Fetch traders for a mint from GMGN and upsert every distinct wallet.
 
-    for address, entry in stats.items():
+    pump.fun's own /trades/all/{mint} endpoint was deprecated (returns 404 as
+    of 2026-07). GMGN's ``token traders`` returns the same data — wallet
+    addresses that traded the mint — and is the same API family the engine
+    already uses, so no new credentials are needed.
+    """
+    try:
+        payload = gmgn_cli(["token", "traders", "--chain", "sol", "--address", mint, "--limit", str(TRADERS_LIMIT)])
+    except Exception as exc:
+        LOG.warning("token traders %s: %s", mint[:8], exc)
+        return 0
+    rows = stat_rows(payload)
+    if not rows:
+        return 0
+
+    traders = 0
+    for row in rows:
+        address = str(row.get("address") or "")
+        if not valid_address(address):
+            continue
+        trades = (int(row.get("buy_tx_count_cur", 0) or 0)
+                  + int(row.get("sell_tx_count_cur", 0) or 0))
+        # Skip wallets with 0 trades on this mint — they are pure holders
+        # or transfer recipients, not traders we can copy.
+        if trades < 1:
+            continue
+        last_active = int(row.get("last_active_timestamp", 0) or 0)
+        # last_active_timestamp may be in milliseconds
+        if last_active > 10_000_000_000:
+            last_active //= 1000
+
         conn.execute(
             "INSERT INTO pumpfun_candidates"
             " (address, trade_count, mint_count, sol_volume, last_trade_ts, first_seen)"
@@ -338,26 +316,26 @@ def scan_mint(conn: sqlite3.Connection, mint: str, now: int) -> int:
             "   trade_count   = trade_count + excluded.trade_count,"
             "   sol_volume    = sol_volume  + excluded.sol_volume,"
             "   last_trade_ts = MAX(last_trade_ts, excluded.last_trade_ts)",
-            (address, int(entry["trades"]), entry["sol"], int(entry["ts"]), now),
+            (address, trades, 0.0, last_active, now),
         )
         cursor = conn.execute(
             "INSERT OR IGNORE INTO pumpfun_wallet_mints(address, mint) VALUES(?,?)",
             (address, mint),
         )
-        # mint_count counts distinct mints, not pages. Incrementing it blindly above
-        # would inflate any wallet that shows up twice on the same coin.
         if cursor.rowcount:
             conn.execute(
                 "UPDATE pumpfun_candidates SET mint_count ="
                 " (SELECT COUNT(*) FROM pumpfun_wallet_mints WHERE address=?) WHERE address=?",
                 (address, address),
             )
+        traders += 1
+
     conn.execute(
         "INSERT OR REPLACE INTO pumpfun_scanned_mints(mint, scanned_at, traders) VALUES(?,?,?)",
-        (mint, now, len(stats)),
+        (mint, now, traders),
     )
     conn.commit()
-    return len(stats)
+    return traders
 
 
 def harvest(conn: sqlite3.Connection, mint_target: int, rescan_hours: int) -> int:
@@ -374,7 +352,7 @@ def harvest(conn: sqlite3.Connection, mint_target: int, rescan_hours: int) -> in
         if _stop:
             break
         traders = scan_mint(conn, mint, int(time.time()))
-        if index % 10 == 0 or traders > 500:
+        if index % 10 == 0 or traders > 50:
             pool = conn.execute("SELECT COUNT(*) FROM pumpfun_candidates").fetchone()[0]
             LOG.info("[%d/%d] %s -> %d traders | pool: %d wallets", index, len(mints), mint[:8], traders, pool)
     after = conn.execute("SELECT COUNT(*) FROM pumpfun_candidates").fetchone()[0]

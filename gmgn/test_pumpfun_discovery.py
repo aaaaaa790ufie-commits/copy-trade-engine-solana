@@ -21,7 +21,7 @@ B = "HrtVLLCBM4LXfRGLGcXBYvkkJ9xnbiJ3ob1MxKdmNs7o"
 C = "Aeg9rNNqNPw6qQ2RgzBHvz25AF1fPqiVBKupd6YQNZmT"
 D = "HZyJNKiMYYgpvd7xK36tGkdG1xf9SkNQjNy8koSDcGyA"
 MINT1 = "2dEpwaujMteZsFYCX3hwaavYKkU7kRwAwJe9XGuWNRGA"
-MINT2 = "3PFEFjRtEJydqiXSWbiMnaqMPwtUMdNwSfbwVZxtMrr9"
+MINT2 = "3PFEFjRtEJydqiXSWbiMnaqmpwtUMdNwSfbwVZxtMrr9"
 
 
 def make_db():
@@ -41,6 +41,18 @@ def make_db():
     return conn, path
 
 
+def gmgn_trader(address: str, buy: int = 1, sell: int = 0,
+                 last_active: int | None = None) -> dict:
+    """Build a GMGN token-trader row for stubbing."""
+    return {
+        "address": address,
+        "buy_tx_count_cur": buy,
+        "sell_tx_count_cur": sell,
+        "last_active_timestamp": last_active or int(time.time()),
+        "profit": 0,
+    }
+
+
 class Parsing(unittest.TestCase):
     def test_address_validation(self):
         self.assertTrue(pf.valid_address(A))
@@ -48,16 +60,6 @@ class Parsing(unittest.TestCase):
         self.assertFalse(pf.valid_address("0x9e7fb44039de8890299dbba78ddb5e1b56297054"))
         self.assertFalse(pf.valid_address(""))
         self.assertFalse(pf.valid_address("short"))
-
-    def test_lamports_vs_sol(self):
-        self.assertAlmostEqual(pf.trade_sol({"sol_amount": 2_500_000_000}), 2.5)
-        self.assertAlmostEqual(pf.trade_sol({"sol_amount": 0.42}), 0.42)
-        self.assertEqual(pf.trade_sol({"sol_amount": "junk"}), 0.0)
-
-    def test_timestamps(self):
-        self.assertEqual(pf.trade_ts({"timestamp": 1784800000}), 1784800000)
-        self.assertEqual(pf.trade_ts({"timestamp": 1784800000123}), 1784800000)
-        self.assertEqual(pf.trade_ts({}), 0)
 
     def test_winrate_normalisation(self):
         self.assertAlmostEqual(pf.number({"winrate": 72}, "winrate"), 0.72)
@@ -74,48 +76,52 @@ class Parsing(unittest.TestCase):
 class Harvest(unittest.TestCase):
     def setUp(self):
         self.conn, self.path = make_db()
-        self._api = pf.api_get
-        pf.TRADES_PAGE = 2
-        pf.TRADES_MAX_PAGES = 5
+        self._cli = pf.gmgn_cli
         pf.REQUEST_DELAY = 0
 
     def tearDown(self):
-        pf.api_get = self._api
+        pf.gmgn_cli = self._cli
         self.conn.close()
         os.unlink(self.path)
 
     def test_same_wallet_twice_on_one_mint_counts_one_mint(self):
-        pages = {
-            0: [
-                {"user": A, "sol_amount": 1_000_000_000, "timestamp": 100},
-                {"user": A, "sol_amount": 2_000_000_000, "timestamp": 200},
-            ],
-            2: [],
-        }
-        pf.api_get = lambda path, params=None: pages.get(params["offset"], [])
+        pf.gmgn_cli = lambda args: [
+            gmgn_trader(A, buy=2, sell=1),  # 3 trades on this mint
+            gmgn_trader(A, buy=1, sell=0),  # duplicate row — ON CONFLICT adds to trade_count
+        ]
         pf.scan_mint(self.conn, MINT1, 1000)
         trades, mints, volume = self.conn.execute(
             "SELECT trade_count, mint_count, sol_volume FROM pumpfun_candidates WHERE address=?", (A,)
         ).fetchone()
-        self.assertEqual(trades, 2)
-        self.assertEqual(mints, 1)  # not 2 — the guard against inflating mint_count per page
-        self.assertAlmostEqual(volume, 3.0)
+        self.assertEqual(trades, 4)  # 3 + 1 from both rows
+        self.assertEqual(mints, 1)   # not 2 — the guard against inflating mint_count per call
+        # sol_volume is 0 for GMGN-sourced wallets (no per-trade SOL data)
+        self.assertAlmostEqual(volume, 0.0)
 
     def test_second_mint_increments_distinct_mint_count(self):
-        pf.api_get = lambda path, params=None: (
-            [{"user": A, "sol_amount": 1_000_000_000, "timestamp": 100}] if params["offset"] == 0 else []
-        )
+        pf.gmgn_cli = lambda args: [gmgn_trader(A, buy=1)]
         pf.scan_mint(self.conn, MINT1, 1000)
         pf.scan_mint(self.conn, MINT2, 1001)
         mints = self.conn.execute("SELECT mint_count FROM pumpfun_candidates WHERE address=?", (A,)).fetchone()[0]
         self.assertEqual(mints, 2)
 
     def test_garbage_addresses_are_dropped(self):
-        pf.api_get = lambda path, params=None: (
-            [{"user": "0xdeadbeef", "sol_amount": 1e9}] if params["offset"] == 0 else []
-        )
+        pf.gmgn_cli = lambda args: [{"address": "0xdeadbeef", "buy_tx_count_cur": 1, "sell_tx_count_cur": 0}]
         pf.scan_mint(self.conn, MINT1, 1000)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM pumpfun_candidates").fetchone()[0], 0)
+
+    def test_zero_trade_wallet_is_skipped(self):
+        """A wallet with buy_tx_count_cur=0 and sell_tx_count_cur=0 is a pure
+        holder or transfer recipient, not a trader worth harvesting."""
+        pf.gmgn_cli = lambda args: [gmgn_trader(A, buy=0, sell=0)]
+        pf.scan_mint(self.conn, MINT1, 1000)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM pumpfun_candidates").fetchone()[0], 0)
+
+    def test_failing_gmgn_returns_zero(self):
+        def boom(args):
+            raise RuntimeError("GMGN down")
+        pf.gmgn_cli = boom
+        self.assertEqual(pf.scan_mint(self.conn, MINT1, 1000), 0)
 
 
 class Verify(unittest.TestCase):

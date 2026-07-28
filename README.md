@@ -59,13 +59,13 @@ Do not commit a generated multi-thousand-wallet snapshot blindly. Run it with th
 
 GMGN's curated feeds are the bottleneck for pool size, not for quality — `track smartmoney` and `track kol` together surface a few hundred wallets, and the weighted rule needs a far bigger universe before several qualified wallets ever land on the same fresh token.
 
-Since this project only trades the pump.fun launchpad (and PumpSwap), pump.fun's own public API is the natural volume source: every trade row carries the trader's wallet, so one busy mint yields hundreds of distinct addresses for a handful of calls.
+Since this project only trades the pump.fun launchpad (and PumpSwap), pump.fun's public `/coins` API is the natural mint-discovery source: it surfaces every active and graduated coin on the launchpad. For the wallet addresses themselves, the pipeline uses **GMGN's `token traders` API** — the same endpoint the engine already calls — because pump.fun's own `/trades/all/{mint}` endpoint was deprecated (returns 404 as of 2026-07).
 
 **pump.fun does not publish win rates.** There is no PnL or "smart wallet" endpoint; anything advertising one is a third-party wrapper. So the pipeline is two stages and the second one is the expensive half:
 
 ```text
-stage 1  pump.fun /coins + /trades/all/{mint}  ->  tens of thousands of addresses  (cheap)
-stage 2  GMGN portfolio stats                  ->  30d win rate + sample size      (rate-limited)
+stage 1  pump.fun /coins -> mint list -> GMGN token traders -> wallet addresses  (one GMGN call per mint)
+stage 2  GMGN portfolio stats -> 30d win rate + sample size                     (rate-limited bulk)
 ```
 
 ```bash
@@ -92,7 +92,7 @@ Expect the funnel to be brutal, and that is the point: most launchpad traders lo
 
 | Setting | Default | Purpose |
 |---|---:|---|
-| `PUMPFUN_MIN_TRADE_SOL` | 0.05 | ignore dust trades when harvesting |
+| `PUMPFUN_TRADERS_LIMIT` | 100 | traders per mint from GMGN |
 | `PUMPFUN_MIN_MINTS` | 2 | distinct coins before a wallet is worth verifying |
 | `PUMPFUN_MIN_TRADES` | 3 | harvested trades before a wallet is worth verifying |
 | `PUMPFUN_MIN_WINRATE` | 0.50 | GMGN 30d win-rate gate |
