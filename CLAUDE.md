@@ -54,6 +54,13 @@ gmgn-cli ──REST──► gmgn/paper_engine.py ──SQLite──┬─► gm
                  + paper account                  └─► gmgn/webapp.py
                  + trailing/hard stops                  read-only JSON API
                  + wallet discovery                     + Mini App UI
+                           │
+          gmgn/pumpfun_discovery.py  ──► pump.fun API    (stage 1: harvest)
+                 │                           │
+                 └──► GMGN portfolio stats    (stage 2: verify win rate)
+                         │
+                         └──► wallet_watch (SQLite)
+                           ↑ engine picks up on next maintenance tick
 
                  gmgn/supervisor.py — runs all three, restarts on exit
 ```
@@ -117,6 +124,11 @@ straight into deletion without ever scoring them.
 | `GMGN_STATS_BATCH_MAX` | 6 | Cap on stats round-trips per pass |
 | `WEBAPP_PORT` | 8770 | Mini App server port |
 | `WEBAPP_PUBLIC_URL` | — | HTTPS origin; enables the Telegram button **and** auth |
+| `PUMPFUN_MIN_TRADE_SOL` | 0.05 | ignore dust trades when harvesting |
+| `PUMPFUN_MIN_MINTS` | 2 | distinct mints before a wallet is worth verifying |
+| `PUMPFUN_MIN_WINRATE` | 0.50 | GMGN 30d win-rate gate for harvester |
+| `PUMPFUN_MIN_30D_TRADES` | 5 | reject lucky 100%-on-one-trade wallets |
+| `PUMPFUN_STATS_DELAY` | 0.35 | pause between GMGN stats batches |
 
 ## Weight computation
 
